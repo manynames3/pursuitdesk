@@ -43,6 +43,9 @@ def seed_mock_data(database_url: str, reset: bool = False) -> Dict[str, int]:
         upsert_capture_workflows(conn, workspace["capture_workflows"])
         upsert_opportunity_notes(conn, workspace["opportunity_notes"])
         upsert_competitor_watchlist(conn, workspace["competitor_watchlist"])
+        upsert_customer_past_performance(conn, workspace["customer_past_performance"])
+        upsert_billing_accounts(conn, workspace["billing_accounts"])
+        upsert_compliance_controls(conn, workspace["compliance_controls"])
         upsert_data_freshness(conn, workspace["data_freshness"])
         upsert_source_evidence(conn, workspace["source_evidence"])
 
@@ -58,6 +61,9 @@ def seed_mock_data(database_url: str, reset: bool = False) -> Dict[str, int]:
             "capture_workflows": len(workspace["capture_workflows"]),
             "opportunity_notes": len(workspace["opportunity_notes"]),
             "competitor_watchlist": len(workspace["competitor_watchlist"]),
+            "customer_past_performance": len(workspace["customer_past_performance"]),
+            "billing_accounts": len(workspace["billing_accounts"]),
+            "compliance_controls": len(workspace["compliance_controls"]),
             "data_freshness": len(workspace["data_freshness"]),
             "source_evidence": len(workspace["source_evidence"]),
         }
@@ -106,6 +112,11 @@ def reset_capture_tables(conn) -> None:
             """
             TRUNCATE TABLE
               capture.audit_events,
+              capture.billing_events,
+              capture.ingest_runs,
+              capture.customer_past_performance,
+              capture.billing_accounts,
+              capture.compliance_controls,
               capture.source_evidence,
               capture.opportunity_notes,
               capture.competitor_watchlist,
@@ -594,6 +605,23 @@ def build_workspace_seed(
             "priority": "medium",
         },
     ]
+    customer_past_performance = build_customer_past_performance(tenant_id, customer_profiles[0]["customer_profile_id"])
+    billing_accounts = [
+        {
+            "billing_account_id": stable_uuid(f"billing:{tenant_id}"),
+            "tenant_id": tenant_id,
+            "billing_provider": "stripe",
+            "provider_customer_id": "cus_demo_captureos",
+            "provider_subscription_id": "sub_demo_captureos",
+            "subscription_status": "trialing",
+            "price_id": "price_captureos_growth_demo",
+            "trial_ends_at": datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc),
+            "current_period_ends_at": datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc),
+            "billing_email": "billing@example.com",
+            "source_payload": {"mock_seed": True},
+        }
+    ]
+    compliance_controls = build_compliance_controls()
     data_freshness = [
         freshness_row("SAM.gov", "Opportunities", "https://api.sam.gov/opportunities/v2/search", len(opportunities), 6),
         freshness_row("USAspending", "Contract Awards", "https://api.usaspending.gov/api/v2/search/spending_by_award/", len(awards), 24),
@@ -609,9 +637,70 @@ def build_workspace_seed(
         "capture_workflows": capture_workflows,
         "opportunity_notes": opportunity_notes,
         "competitor_watchlist": competitor_watchlist,
+        "customer_past_performance": customer_past_performance,
+        "billing_accounts": billing_accounts,
+        "compliance_controls": compliance_controls,
         "data_freshness": data_freshness,
         "source_evidence": source_evidence,
     }
+
+
+def build_customer_past_performance(tenant_id: str, customer_profile_id: str) -> List[Dict[str, Any]]:
+    rows = [
+        ("RAF-FA8773-24-F-0112", "subcontractor", "General Dynamics Information Technology, Inc.", "Department of the Air Force", "057", "541512", "DA01", "Zero Trust Platform Engineering", Decimal("18400000.00"), ["GSA MAS IT"], "Secret"),
+        ("RAF-70RTAC-23-F-0029", "subcontractor", "Accenture Federal Services LLC", "Department of Homeland Security", "070", "541511", "DA10", "Case Management Data Migration", Decimal("15100000.00"), ["OASIS+"], "Public Trust"),
+        ("RAF-W56KGY-25-F-0041", "subcontractor", "Palantir USG, Inc.", "Department of the Army", "021", "541715", "AC12", "Mission Data Fabric DevSecOps", Decimal("22900000.00"), ["CIO-SP4 Teaming Pool"], "TS/SCI eligible"),
+        ("RAF-N00039-24-F-0099", "subcontractor", "Booz Allen Hamilton Inc.", "Department of the Navy", "017", "541519", "R425", "Cyber Range Automation Support", Decimal("9600000.00"), ["GSA MAS IT"], "Secret"),
+    ]
+    return [
+        {
+            "past_performance_id": stable_uuid(f"past-performance:{contract_number}"),
+            "tenant_id": tenant_id,
+            "customer_profile_id": customer_profile_id,
+            "source": "mock_customer_import",
+            "contract_number": contract_number,
+            "role": role,
+            "prime_name": prime_name,
+            "agency_name": agency_name_value,
+            "agency_code": agency_code,
+            "naics_code": naics_code,
+            "psc_code": psc_code,
+            "title": title,
+            "description": f"{title} delivery with agile engineering, cleared staff, and production operations support.",
+            "start_date": date(2024, 1, 1),
+            "end_date": date(2026, 12, 31),
+            "obligated_amount": amount,
+            "contract_vehicles": vehicles,
+            "clearance_required": clearance,
+            "customer_rating": "Exceptional",
+            "source_payload": {"mock_seed": True},
+        }
+        for contract_number, role, prime_name, agency_name_value, agency_code, naics_code, psc_code, title, amount, vehicles, clearance in rows
+    ]
+
+
+def build_compliance_controls() -> List[Dict[str, Any]]:
+    specs = [
+        ("auth.jwt", "Access Control", "JWT issuer, audience, and JWKS validation", "implemented", "FastAPI validates Bearer tokens when AUTH_REQUIRED=true; API Gateway JWT authorizer can also be enabled."),
+        ("tenant.isolation", "Access Control", "Tenant-scoped data access", "implemented", "Tenant context is resolved from JWT claims or demo headers and applied to workflow, notes, billing, and onboarding queries."),
+        ("audit.workflow", "Audit", "Workflow mutation audit trail", "implemented", "Go/no-go and workflow updates write audit_events with actor, resource, IP, user agent, and payload metadata."),
+        ("secrets.gsa", "Secrets", "GSA API key outside source control", "implemented", "Ingest Lambda reads SAM_API_KEY_SECRET_ARN from Secrets Manager or environment for local-only use."),
+        ("privacy.headers", "Privacy", "Browser security headers", "implemented", "Cloudflare Pages serves X-Frame-Options, no-sniff, referrer, permissions, and CSP headers."),
+        ("billing.stripe", "Billing", "Stripe checkout and webhook ledger", "implemented", "API creates Stripe Checkout sessions when STRIPE_API_KEY and STRIPE_PRICE_ID are configured; webhook events are persisted."),
+    ]
+    return [
+        {
+            "control_id": stable_uuid(f"control:{key}"),
+            "control_key": key,
+            "control_family": family,
+            "control_name": name,
+            "implementation_status": status,
+            "implementation_notes": notes,
+            "evidence_url": None,
+            "owner": "platform",
+        }
+        for key, family, name, status, notes in specs
+    ]
 
 
 def freshness_row(source_system: str, dataset_name: str, source_url: str, record_count: int, sla_hours: int) -> Dict[str, Any]:
@@ -1213,6 +1302,147 @@ def upsert_competitor_watchlist(conn, rows: Sequence[Mapping[str, Any]]) -> None
             """,
             values,
             page_size=50,
+        )
+
+
+def upsert_customer_past_performance(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (
+            row["past_performance_id"],
+            row["tenant_id"],
+            row["customer_profile_id"],
+            row["source"],
+            row["contract_number"],
+            row["role"],
+            row["prime_name"],
+            row["agency_name"],
+            row["agency_code"],
+            row["naics_code"],
+            row["psc_code"],
+            row["title"],
+            row["description"],
+            row["start_date"],
+            row["end_date"],
+            row["obligated_amount"],
+            row["contract_vehicles"],
+            row["clearance_required"],
+            row["customer_rating"],
+            Json(row["source_payload"]),
+        )
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.customer_past_performance (
+              past_performance_id, tenant_id, customer_profile_id, source, contract_number,
+              role, prime_name, agency_name, agency_code, naics_code, psc_code, title,
+              description, start_date, end_date, obligated_amount, contract_vehicles,
+              clearance_required, customer_rating, source_payload
+            )
+            VALUES %s
+            ON CONFLICT (tenant_id, contract_number, role)
+            DO UPDATE SET
+              prime_name = EXCLUDED.prime_name,
+              agency_name = EXCLUDED.agency_name,
+              agency_code = EXCLUDED.agency_code,
+              naics_code = EXCLUDED.naics_code,
+              psc_code = EXCLUDED.psc_code,
+              title = EXCLUDED.title,
+              description = EXCLUDED.description,
+              obligated_amount = EXCLUDED.obligated_amount,
+              contract_vehicles = EXCLUDED.contract_vehicles,
+              clearance_required = EXCLUDED.clearance_required,
+              customer_rating = EXCLUDED.customer_rating,
+              source_payload = EXCLUDED.source_payload,
+              updated_at = now();
+            """,
+            values,
+            page_size=50,
+        )
+
+
+def upsert_billing_accounts(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (
+            row["billing_account_id"],
+            row["tenant_id"],
+            row["billing_provider"],
+            row["provider_customer_id"],
+            row["provider_subscription_id"],
+            row["subscription_status"],
+            row["price_id"],
+            row["trial_ends_at"],
+            row["current_period_ends_at"],
+            row["billing_email"],
+            Json(row["source_payload"]),
+        )
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.billing_accounts (
+              billing_account_id, tenant_id, billing_provider, provider_customer_id,
+              provider_subscription_id, subscription_status, price_id, trial_ends_at,
+              current_period_ends_at, billing_email, source_payload
+            )
+            VALUES %s
+            ON CONFLICT (tenant_id)
+            DO UPDATE SET
+              billing_provider = EXCLUDED.billing_provider,
+              provider_customer_id = EXCLUDED.provider_customer_id,
+              provider_subscription_id = EXCLUDED.provider_subscription_id,
+              subscription_status = EXCLUDED.subscription_status,
+              price_id = EXCLUDED.price_id,
+              trial_ends_at = EXCLUDED.trial_ends_at,
+              current_period_ends_at = EXCLUDED.current_period_ends_at,
+              billing_email = EXCLUDED.billing_email,
+              source_payload = EXCLUDED.source_payload,
+              updated_at = now();
+            """,
+            values,
+            page_size=20,
+        )
+
+
+def upsert_compliance_controls(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (
+            row["control_id"],
+            row["control_key"],
+            row["control_family"],
+            row["control_name"],
+            row["implementation_status"],
+            row["implementation_notes"],
+            row["evidence_url"],
+            row["owner"],
+        )
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.compliance_controls (
+              control_id, control_key, control_family, control_name,
+              implementation_status, implementation_notes, evidence_url, owner
+            )
+            VALUES %s
+            ON CONFLICT (control_key)
+            DO UPDATE SET
+              control_family = EXCLUDED.control_family,
+              control_name = EXCLUDED.control_name,
+              implementation_status = EXCLUDED.implementation_status,
+              implementation_notes = EXCLUDED.implementation_notes,
+              evidence_url = EXCLUDED.evidence_url,
+              owner = EXCLUDED.owner,
+              updated_at = now();
+            """,
+            values,
+            page_size=20,
         )
 
 

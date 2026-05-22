@@ -6,7 +6,7 @@ resource "aws_apigatewayv2_api" "http" {
   # VPC Link, private API, or PrivateLink endpoint is created.
   cors_configuration {
     allow_credentials = false
-    allow_headers     = ["authorization", "content-type", "x-request-id"]
+    allow_headers     = ["authorization", "content-type", "x-request-id", "x-captureos-tenant", "x-captureos-user"]
     allow_methods     = ["GET", "POST", "OPTIONS"]
     allow_origins     = var.api_cors_allowed_origins
     max_age           = 300
@@ -27,18 +27,59 @@ resource "aws_apigatewayv2_integration" "lambda_proxy" {
   timeout_milliseconds   = 10000
 }
 
+resource "aws_apigatewayv2_authorizer" "jwt" {
+  count = var.enable_api_gateway_jwt_authorizer ? 1 : 0
+
+  api_id           = aws_apigatewayv2_api.http.id
+  authorizer_type  = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+  name             = "${local.name_prefix}-jwt"
+
+  jwt_configuration {
+    audience = [var.jwt_audience]
+    issuer   = var.jwt_issuer
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.jwt_issuer != "" && var.jwt_audience != ""
+      error_message = "enable_api_gateway_jwt_authorizer requires jwt_issuer and jwt_audience."
+    }
+  }
+}
+
 resource "aws_apigatewayv2_route" "root" {
   api_id = aws_apigatewayv2_api.http.id
 
-  route_key = "ANY /"
-  target    = "integrations/${aws_apigatewayv2_integration.lambda_proxy.id}"
+  route_key          = "ANY /"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda_proxy.id}"
+  authorization_type = var.enable_api_gateway_jwt_authorizer ? "JWT" : "NONE"
+  authorizer_id      = var.enable_api_gateway_jwt_authorizer ? aws_apigatewayv2_authorizer.jwt[0].id : null
 }
 
 resource "aws_apigatewayv2_route" "proxy" {
   api_id = aws_apigatewayv2_api.http.id
 
-  route_key = "ANY /{proxy+}"
-  target    = "integrations/${aws_apigatewayv2_integration.lambda_proxy.id}"
+  route_key          = "ANY /{proxy+}"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda_proxy.id}"
+  authorization_type = var.enable_api_gateway_jwt_authorizer ? "JWT" : "NONE"
+  authorizer_id      = var.enable_api_gateway_jwt_authorizer ? aws_apigatewayv2_authorizer.jwt[0].id : null
+}
+
+resource "aws_apigatewayv2_route" "stripe_webhook" {
+  api_id = aws_apigatewayv2_api.http.id
+
+  route_key          = "POST /api/v1/billing/webhook"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda_proxy.id}"
+  authorization_type = "NONE"
+}
+
+resource "aws_apigatewayv2_route" "health" {
+  api_id = aws_apigatewayv2_api.http.id
+
+  route_key          = "GET /api/v1/health"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda_proxy.id}"
+  authorization_type = "NONE"
 }
 
 resource "aws_apigatewayv2_stage" "default" {

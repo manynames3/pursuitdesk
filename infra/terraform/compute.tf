@@ -3,6 +3,8 @@ locals {
 
   lambda_base_environment = {
     AWS_USE_DUALSTACK_ENDPOINT = "true"
+    APP_PUBLIC_URL             = var.app_public_url
+    AUTH_REQUIRED              = tostring(var.auth_required)
     BEDROCK_MODEL_ID           = var.bedrock_model_id
     DATABASE_HOST              = aws_db_instance.postgres.address
     DATABASE_NAME              = var.db_name
@@ -11,6 +13,15 @@ locals {
     DATABASE_URL               = local.database_url
     DATABASE_USER              = var.db_username
     PGVECTOR_SCHEMA            = "capture"
+    JWT_AUDIENCE               = var.jwt_audience
+    JWT_ISSUER                 = var.jwt_issuer
+    JWT_JWKS_URL               = var.jwt_jwks_url
+    JWT_ROLE_CLAIM             = var.jwt_role_claim
+    JWT_TENANT_CLAIM           = var.jwt_tenant_claim
+    SAM_API_KEY_SECRET_ARN     = var.sam_api_key_secret_arn
+    STRIPE_API_KEY_SECRET_ARN  = var.stripe_api_key_secret_arn
+    STRIPE_PRICE_ID            = var.stripe_price_id
+    STRIPE_WEBHOOK_SECRET_ARN  = var.stripe_webhook_secret_arn
     VECTOR_STORE               = "pgvector"
   }
 
@@ -77,7 +88,7 @@ resource "aws_iam_role_policy" "lambda_runtime" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Sid    = "InvokeBedrockModels"
         Effect = "Allow"
@@ -87,7 +98,21 @@ resource "aws_iam_role_policy" "lambda_runtime" {
         ]
         Resource = "*"
       }
-    ]
+      ],
+      length(compact([var.sam_api_key_secret_arn, var.stripe_api_key_secret_arn, var.stripe_webhook_secret_arn])) > 0 ? [
+        {
+          Sid    = "ReadConfiguredSecrets"
+          Effect = "Allow"
+          Action = [
+            "secretsmanager:GetSecretValue"
+          ]
+          Resource = compact([
+            var.sam_api_key_secret_arn,
+            var.stripe_api_key_secret_arn,
+            var.stripe_webhook_secret_arn
+          ])
+        }
+    ] : [])
   })
 }
 

@@ -159,6 +159,108 @@ variable "bedrock_model_id" {
   default     = "anthropic.claude-3-5-sonnet-20241022-v2:0"
 }
 
+variable "auth_required" {
+  description = "When true, the API Lambda enforces Bearer JWT validation through JWKS."
+  type        = bool
+  default     = false
+}
+
+variable "jwt_issuer" {
+  description = "Expected JWT issuer, for example a Cognito user pool or Cloudflare Access issuer."
+  type        = string
+  default     = ""
+}
+
+variable "jwt_audience" {
+  description = "Expected JWT audience/client ID."
+  type        = string
+  default     = ""
+}
+
+variable "jwt_jwks_url" {
+  description = "JWKS URL used by the API Lambda for token signature validation."
+  type        = string
+  default     = ""
+}
+
+variable "jwt_tenant_claim" {
+  description = "JWT claim containing the CaptureOS tenant slug."
+  type        = string
+  default     = "https://captureos/tenant"
+}
+
+variable "jwt_role_claim" {
+  description = "JWT claim containing the CaptureOS role."
+  type        = string
+  default     = "https://captureos/role"
+}
+
+variable "enable_api_gateway_jwt_authorizer" {
+  description = "Attach API Gateway v2 JWT authorizer to all routes. Requires jwt_issuer and jwt_audience."
+  type        = bool
+  default     = false
+}
+
+variable "sam_api_key_secret_arn" {
+  description = "Optional Secrets Manager ARN containing the SAM.gov API key. Use key SAM_API_KEY for JSON secrets."
+  type        = string
+  default     = ""
+}
+
+variable "stripe_api_key_secret_arn" {
+  description = "Optional Secrets Manager ARN containing the Stripe API key. Use key STRIPE_API_KEY for JSON secrets."
+  type        = string
+  default     = ""
+}
+
+variable "stripe_webhook_secret_arn" {
+  description = "Optional Secrets Manager ARN containing the Stripe webhook signing secret. Use key STRIPE_WEBHOOK_SECRET for JSON secrets."
+  type        = string
+  default     = ""
+}
+
+variable "stripe_price_id" {
+  description = "Stripe recurring price ID used for hosted checkout."
+  type        = string
+  default     = ""
+}
+
+variable "app_public_url" {
+  description = "Public frontend URL used for billing success/cancel redirects."
+  type        = string
+  default     = "https://govcon-captureos.pages.dev"
+}
+
+variable "enable_gsa_ingest_schedule" {
+  description = "Create a low-cost EventBridge Scheduler job for live SAM.gov opportunity ingestion."
+  type        = bool
+  default     = false
+}
+
+variable "gsa_ingest_schedule_expression" {
+  description = "EventBridge Scheduler expression for live SAM.gov opportunity ingestion."
+  type        = string
+  default     = "rate(6 hours)"
+}
+
+variable "gsa_ingest_lookback_days" {
+  description = "Number of posted-date days the scheduled SAM.gov ingestion scans each run."
+  type        = number
+  default     = 1
+}
+
+variable "gsa_ingest_max_pages" {
+  description = "Maximum SAM.gov pages to read per scheduled run to keep demo costs bounded."
+  type        = number
+  default     = 2
+}
+
+variable "enable_cloudwatch_alarms" {
+  description = "Create optional CloudWatch alarms for Lambda errors and API 5xx responses. Disabled by default to avoid idle demo spend."
+  type        = bool
+  default     = false
+}
+
 variable "api_cors_allowed_origins" {
   description = "Allowed browser origins for the HTTP API. Use the Cloudflare-hosted frontend origin in shared demos."
   type        = list(string)

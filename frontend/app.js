@@ -81,6 +81,15 @@ const fallbackAnalysis = {
     { source_system: "SAM.gov", dataset_name: "Opportunities", source_mode: "mock_seed", freshness_state: "fresh", last_successful_sync_at: "2026-05-22T12:00:00Z", record_count: 5 },
     { source_system: "FSRS", dataset_name: "Subaward Reporting", source_mode: "mock_seed", freshness_state: "fresh", last_successful_sync_at: "2026-05-22T12:00:00Z", record_count: 48 },
   ],
+  past_performance: [
+    { contract_number: "RAF-FA8773-24-F-0112", title: "Zero Trust Platform Engineering", role: "subcontractor", agency_name: "Department of the Air Force", obligated_amount: 18400000 },
+    { contract_number: "RAF-W56KGY-25-F-0041", title: "Mission Data Fabric DevSecOps", role: "subcontractor", agency_name: "Department of the Army", obligated_amount: 22900000 },
+  ],
+  billing: { subscription_status: "trialing", current_period_ends_at: "2026-06-21T12:00:00Z" },
+  compliance_controls: [
+    { control_key: "auth.jwt", control_family: "Access Control", control_name: "JWT issuer, audience, and JWKS validation", implementation_status: "implemented" },
+    { control_key: "audit.workflow", control_family: "Audit", control_name: "Workflow mutation audit trail", implementation_status: "implemented" },
+  ],
   security_context: { tenant_name: "Apex Analytica Federal Growth Team", role: "capture_manager", auth_mode: "demo_header_context" },
 };
 
@@ -111,6 +120,9 @@ const els = {
   fitFactors: document.querySelector("#fit-factors"),
   workflow: document.querySelector("#workflow"),
   freshness: document.querySelector("#freshness"),
+  pastPerformance: document.querySelector("#past-performance"),
+  billing: document.querySelector("#billing"),
+  compliance: document.querySelector("#compliance"),
   primes: document.querySelector("#primes"),
   subs: document.querySelector("#subs"),
   rates: document.querySelector("#rates"),
@@ -273,6 +285,9 @@ function renderAnalysis(data) {
   renderFitFactors(customerScore.factors || []);
   renderWorkflow(data.workflow || {});
   renderFreshness(data.data_freshness || []);
+  renderPastPerformance(data.past_performance || []);
+  renderBilling(data.billing || {});
+  renderCompliance(data.compliance_controls || []);
   renderPrimes(data.competing_primes || []);
   renderSubs(data.target_teaming_subs || []);
   renderRates(data.calc_plus_benchmarks || []);
@@ -333,6 +348,56 @@ function renderFreshness(rows) {
         </div>
       `).join("")
     : `<div class="empty">No source freshness records available.</div>`;
+}
+
+function renderPastPerformance(rows) {
+  els.pastPerformance.innerHTML = rows.length
+    ? rows.slice(0, 4).map((row) => `
+        <div class="row compact">
+          <div class="row-title">
+            <strong>${escapeHtml(row.title)}</strong>
+            <span class="badge">${escapeHtml(row.role || "history")}</span>
+          </div>
+          <div class="row-meta">
+            <span>${escapeHtml(row.agency_name || "--")}</span>
+            <span>${escapeHtml(row.naics_code || "--")}/${escapeHtml(row.psc_code || "--")}</span>
+            <span>${money(row.obligated_amount)}</span>
+          </div>
+        </div>
+      `).join("")
+    : `<div class="empty">No customer past performance imported.</div>`;
+}
+
+function renderBilling(billing) {
+  els.billing.innerHTML = `
+    <div class="row compact">
+      <div class="row-title">
+        <strong>${escapeHtml(titleCase(billing.subscription_status || "not configured"))}</strong>
+        <span class="badge">${escapeHtml(billing.billing_provider || "billing")}</span>
+      </div>
+      <div class="row-meta">
+        <span>${escapeHtml(billing.price_id || "Price pending")}</span>
+        <span>Period end ${formatDate(billing.current_period_ends_at)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderCompliance(rows) {
+  els.compliance.innerHTML = rows.length
+    ? rows.slice(0, 4).map((row) => `
+        <div class="row compact">
+          <div class="row-title">
+            <strong>${escapeHtml(row.control_name)}</strong>
+            <span class="badge ${escapeHtml(row.implementation_status)}">${escapeHtml(row.implementation_status)}</span>
+          </div>
+          <div class="row-meta">
+            <span>${escapeHtml(row.control_family)}</span>
+            <span>${escapeHtml(row.control_key)}</span>
+          </div>
+        </div>
+      `).join("")
+    : `<div class="empty">No compliance controls recorded.</div>`;
 }
 
 function renderPrimes(items) {

@@ -58,3 +58,18 @@ The live demo now exposes the buyer-facing capture workspace layer:
 - Tenant, user, RBAC, watchlist, and audit-event tables for production auth integration.
 
 The deployed demo uses `demo_header_context` so the public Cloudflare page can be exercised without a login. Before charging real customers, put API Gateway behind Cognito, Cloudflare Access, or another verified JWT provider and enforce tenant claims instead of default headers.
+
+## Production Hardening Switches
+
+Set these Terraform variables when moving from demo mode to paid users:
+
+- `auth_required = true`
+- `jwt_issuer`, `jwt_audience`, `jwt_jwks_url`
+- `enable_api_gateway_jwt_authorizer = true` when issuer/audience are stable
+- `sam_api_key_secret_arn` and `enable_gsa_ingest_schedule = true`
+- `stripe_api_key_secret_arn`, `stripe_webhook_secret_arn`, and `stripe_price_id`
+- `enable_cloudwatch_alarms = true` if the small CloudWatch alarm cost is acceptable
+
+The SAM.gov scheduler uses EventBridge Scheduler and invokes the ingest Lambda directly. It upserts opportunities into PostgreSQL and updates `capture.data_freshness` and `capture.ingest_runs`. It is disabled by default so the demo does not fail without a SAM.gov API key.
+
+Auth is enforced in the API Lambda through JWKS validation and can also be enforced at API Gateway. Billing checkout uses Stripe Checkout when secrets are configured; Stripe webhooks verify `Stripe-Signature` when a webhook signing secret is present. Customer onboarding imports past performance into `capture.customer_past_performance` and refreshes the scoring profile rollup.

@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -60,6 +60,9 @@ class RetryBudgetExceeded(IngestError):
 
 
 def lambda_handler(event: Mapping[str, Any], context: Any) -> Dict[str, Any]:
+    if "Records" not in event:
+        return ingest_direct_event(event, context=context)
+
     failures: List[Dict[str, str]] = []
     processed = 0
 
@@ -74,6 +77,83 @@ def lambda_handler(event: Mapping[str, Any], context: Any) -> Dict[str, Any]:
             failures.append({"itemIdentifier": message_id})
 
     return {"batchItemFailures": failures, "processedRecords": processed}
+
+
+def ingest_direct_event(event: Mapping[str, Any], context: Any = None) -> Dict[str, Any]:
+    body = _scheduled_body(event)
+    output_queue_url = body.get("output_queue_url") or os.getenv("UPSERT_QUEUE_URL")
+    direct_db_upsert = _truthy(body.get("direct_db_upsert", os.getenv("DIRECT_DB_UPSERT", "true")))
+    if not output_queue_url and not direct_db_upsert and not body.get("dry_run"):
+        raise IngestError("Set DIRECT_DB_UPSERT=true, UPSERT_QUEUE_URL, or dry_run=true for direct ingestion.")
+
+    record = {
+        "messageId": str(event.get("id") or f"direct-{int(time.time())}"),
+        "body": body,
+        "attributes": {"MessageGroupId": "sam-opportunities-scheduled"},
+    }
+
+    run_id = None
+    if direct_db_upsert:
+        run_id = _start_ingest_run(body)
+
+    try:
+        if direct_db_upsert:
+            summary = ingest_direct_to_database(record, context=context)
+        else:
+            summary = ingest_sqs_record(record, context=context)
+        if run_id:
+            _finish_ingest_run(run_id, "succeeded", summary.get("normalizedRecords", 0), summary.get("writtenRecords", 0))
+        return summary
+    except Exception as exc:
+        if run_id:
+            _finish_ingest_run(run_id, "failed", 0, 0, str(exc))
+        raise
+
+
+def ingest_direct_to_database(record: Mapping[str, Any], context: Any = None) -> Dict[str, Any]:
+    body = _json_object(record.get("body"))
+    config = _build_request_config(body)
+    dry_run = bool(body.get("dry_run", False))
+
+    normalized_count = 0
+    written_count = 0
+    dry_run_records: List[Dict[str, Any]] = []
+    for page_response, records in iter_opportunity_pages(config, str(record.get("messageId", "direct")), context):
+        source_received_at = datetime.now(timezone.utc).isoformat()
+        payloads = [normalize_opportunity(item, config["ingest_window"], source_received_at) for item in records]
+        normalized_count += len(payloads)
+        if dry_run:
+            remaining = max(0, int(body.get("dry_run_max_records", 25)) - len(dry_run_records))
+            dry_run_records.extend(payloads[:remaining])
+        else:
+            written_count += upsert_opportunities_to_database(payloads)
+        LOGGER.info(
+            "Fetched SAM.gov direct page offset=%s limit=%s totalRecords=%s pageRecords=%s",
+            page_response.get("offset"),
+            page_response.get("limit"),
+            page_response.get("totalRecords"),
+            len(records),
+        )
+
+    if not dry_run:
+        update_data_freshness(
+            source_system="SAM.gov",
+            dataset_name="Opportunities",
+            source_mode="live_api",
+            record_count=written_count,
+            source_url=config["endpoint"],
+        )
+
+    summary: Dict[str, Any] = {
+        "normalizedRecords": normalized_count,
+        "writtenRecords": written_count,
+        "postedFrom": config["params"]["postedFrom"],
+        "postedTo": config["params"]["postedTo"],
+        "directDbUpsert": not dry_run,
+    }
+    if dry_run:
+        summary["records"] = dry_run_records
+    return summary
 
 
 def ingest_sqs_record(record: Mapping[str, Any], context: Any = None) -> Dict[str, Any]:
@@ -311,7 +391,7 @@ def emit_upsert_payloads(records: List[Dict[str, Any]], queue_url: str, group_id
 
 
 def _build_request_config(body: Mapping[str, Any]) -> Dict[str, Any]:
-    api_key = body.get("api_key") or os.getenv("SAM_API_KEY")
+    api_key = body.get("api_key") or _resolve_sam_api_key()
     if not api_key:
         raise IngestError("SAM_API_KEY must be configured or provided in the SQS message body.")
 
@@ -353,6 +433,194 @@ def _build_request_config(body: Mapping[str, Any]) -> Dict[str, Any]:
             "filters": {k: v for k, v in params.items() if k not in {"api_key", "postedFrom", "postedTo", "limit"}},
         },
     }
+
+
+def upsert_opportunities_to_database(records: List[Dict[str, Any]]) -> int:
+    if not records:
+        return 0
+    import psycopg2
+    from psycopg2.extras import Json, execute_values
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise IngestError("DATABASE_URL must be configured for direct DB upsert.")
+
+    values = []
+    for record in records:
+        opp = record["opportunity"]
+        values.append(
+            (
+                opp["notice_id"],
+                opp["solicitation_number"],
+                opp["title"],
+                opp["opportunity_type"],
+                opp["base_type"],
+                opp["active_status"],
+                opp["posted_at"],
+                opp["response_deadline"],
+                opp["archive_at"],
+                opp["naics_code"],
+                opp["psc_code"],
+                opp["set_aside_code"],
+                opp["set_aside_description"],
+                opp["funding_agency_name"],
+                opp["funding_agency_code"],
+                opp["subtier_name"],
+                opp["office_name"],
+                opp["full_parent_path_name"],
+                opp["full_parent_path_code"],
+                opp["organization_type"],
+                Json(opp["place_of_performance"]),
+                Json(opp["office_address"]),
+                opp["estimated_value_min"],
+                opp["estimated_value_max"],
+                opp["currency_code"],
+                opp["description_url"],
+                opp["ui_link"],
+                opp["resource_links"],
+                opp["sow_text"],
+                Json(opp["source_payload"]),
+                opp["source_updated_at"],
+            )
+        )
+
+    with psycopg2.connect(database_url, connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO capture.opportunities (
+                  notice_id, solicitation_number, title, opportunity_type, base_type,
+                  active_status, posted_at, response_deadline, archive_at, naics_code,
+                  psc_code, set_aside_code, set_aside_description, funding_agency_name,
+                  funding_agency_code, subtier_name, office_name, full_parent_path_name,
+                  full_parent_path_code, organization_type, place_of_performance,
+                  office_address, estimated_value_min, estimated_value_max, currency_code,
+                  description_url, ui_link, resource_links, sow_text, source_payload,
+                  source_updated_at
+                )
+                VALUES %s
+                ON CONFLICT (notice_id)
+                DO UPDATE SET
+                  solicitation_number = EXCLUDED.solicitation_number,
+                  title = EXCLUDED.title,
+                  opportunity_type = EXCLUDED.opportunity_type,
+                  base_type = EXCLUDED.base_type,
+                  active_status = EXCLUDED.active_status,
+                  posted_at = EXCLUDED.posted_at,
+                  response_deadline = EXCLUDED.response_deadline,
+                  archive_at = EXCLUDED.archive_at,
+                  naics_code = EXCLUDED.naics_code,
+                  psc_code = EXCLUDED.psc_code,
+                  set_aside_code = EXCLUDED.set_aside_code,
+                  set_aside_description = EXCLUDED.set_aside_description,
+                  funding_agency_name = EXCLUDED.funding_agency_name,
+                  funding_agency_code = EXCLUDED.funding_agency_code,
+                  subtier_name = EXCLUDED.subtier_name,
+                  office_name = EXCLUDED.office_name,
+                  full_parent_path_name = EXCLUDED.full_parent_path_name,
+                  full_parent_path_code = EXCLUDED.full_parent_path_code,
+                  organization_type = EXCLUDED.organization_type,
+                  place_of_performance = EXCLUDED.place_of_performance,
+                  office_address = EXCLUDED.office_address,
+                  estimated_value_min = EXCLUDED.estimated_value_min,
+                  estimated_value_max = EXCLUDED.estimated_value_max,
+                  description_url = EXCLUDED.description_url,
+                  ui_link = EXCLUDED.ui_link,
+                  resource_links = EXCLUDED.resource_links,
+                  sow_text = COALESCE(EXCLUDED.sow_text, capture.opportunities.sow_text),
+                  source_payload = EXCLUDED.source_payload,
+                  source_updated_at = EXCLUDED.source_updated_at,
+                  updated_at = now();
+                """,
+                values,
+                page_size=100,
+            )
+    return len(records)
+
+
+def update_data_freshness(
+    source_system: str,
+    dataset_name: str,
+    source_mode: str,
+    record_count: int,
+    source_url: str,
+) -> None:
+    import psycopg2
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return
+    with psycopg2.connect(database_url, connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO capture.data_freshness (
+                  source_system, dataset_name, source_mode, last_successful_sync_at,
+                  last_attempted_sync_at, sync_status, record_count, freshness_sla_hours,
+                  source_url, notes
+                )
+                VALUES (%s, %s, %s, now(), now(), 'ready', %s, 6, %s, 'Live scheduler completed.')
+                ON CONFLICT (source_system, dataset_name)
+                DO UPDATE SET
+                  source_mode = EXCLUDED.source_mode,
+                  last_successful_sync_at = EXCLUDED.last_successful_sync_at,
+                  last_attempted_sync_at = EXCLUDED.last_attempted_sync_at,
+                  sync_status = 'ready',
+                  record_count = EXCLUDED.record_count,
+                  source_url = EXCLUDED.source_url,
+                  notes = EXCLUDED.notes,
+                  updated_at = now();
+                """,
+                (source_system, dataset_name, source_mode, record_count, source_url),
+            )
+
+
+def _start_ingest_run(body: Mapping[str, Any]) -> Optional[str]:
+    import psycopg2
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return None
+    with psycopg2.connect(database_url, connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO capture.ingest_runs (source_system, dataset_name, run_status, run_config)
+                VALUES ('SAM.gov', 'Opportunities', 'started', %s::jsonb)
+                RETURNING ingest_run_id::text;
+                """,
+                (json.dumps(_redacted(body)),),
+            )
+            return str(cur.fetchone()[0])
+
+
+def _finish_ingest_run(
+    run_id: str,
+    status_value: str,
+    records_read: int,
+    records_written: int,
+    error_message: Optional[str] = None,
+) -> None:
+    import psycopg2
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return
+    with psycopg2.connect(database_url, connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture.ingest_runs
+                SET run_status = %s,
+                    finished_at = now(),
+                    records_read = %s,
+                    records_written = %s,
+                    error_message = %s
+                WHERE ingest_run_id = %s::uuid;
+                """,
+                (status_value, records_read, records_written, error_message, run_id),
+            )
 
 
 def _http_get_json(endpoint: str, params: Mapping[str, Any]) -> Dict[str, Any]:
@@ -479,6 +747,49 @@ def _json_object(raw: Any) -> Dict[str, Any]:
     if not isinstance(parsed, Mapping):
         raise IngestError("SQS message body must be a JSON object.")
     return dict(parsed)
+
+
+def _scheduled_body(event: Mapping[str, Any]) -> Dict[str, Any]:
+    if "body" in event:
+        return _json_object(event.get("body"))
+    body = dict(event)
+    lookback_days = int(body.get("lookback_days") or os.getenv("SAM_INGEST_LOOKBACK_DAYS", "1"))
+    window_end = datetime.now(timezone.utc).date()
+    window_start = window_end - timedelta(days=max(1, lookback_days))
+    body.setdefault("posted_from", window_start.isoformat())
+    body.setdefault("posted_to", window_end.isoformat())
+    body.setdefault("limit", int(os.getenv("PAGE_LIMIT", "1000")))
+    body.setdefault("max_pages", int(os.getenv("SCHEDULED_MAX_PAGES", "2")))
+    body.setdefault("direct_db_upsert", os.getenv("DIRECT_DB_UPSERT", "true"))
+    return body
+
+
+def _resolve_sam_api_key() -> Optional[str]:
+    direct = os.getenv("SAM_API_KEY")
+    if direct:
+        return direct
+    secret_arn = os.getenv("SAM_API_KEY_SECRET_ARN")
+    if not secret_arn:
+        return None
+    import boto3
+
+    secret = boto3.client("secretsmanager").get_secret_value(SecretId=secret_arn)
+    value = secret.get("SecretString")
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, Mapping):
+            return str(parsed.get("SAM_API_KEY") or parsed.get("api_key") or parsed.get("value") or "")
+    except json.JSONDecodeError:
+        return value
+    return value
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _json_dict(value: Any) -> Dict[str, Any]:

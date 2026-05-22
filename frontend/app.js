@@ -138,14 +138,14 @@ els.exportBrief.addEventListener("click", exportBrief);
 loadOpportunities();
 
 async function loadOpportunities() {
-  const params = new URLSearchParams({
-    min_value: valueOf("#min-value"),
-    max_value: valueOf("#max-value"),
-    limit: "25",
-  });
+  const params = new URLSearchParams({ limit: "25" });
 
   const search = valueOf("#search");
+  const minValue = valueOf("#min-value");
+  const maxValue = valueOf("#max-value");
   if (search) params.set("q", search);
+  if (minValue) params.set("min_value", minValue);
+  if (maxValue) params.set("max_value", maxValue);
   splitCodes(valueOf("#naics")).forEach((code) => params.append("naics_codes", code));
   splitCodes(valueOf("#psc")).forEach((code) => params.append("psc_codes", code));
 

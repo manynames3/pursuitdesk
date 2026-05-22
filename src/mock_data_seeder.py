@@ -172,6 +172,12 @@ def build_entities() -> List[Dict[str, Any]]:
         ("twosix", "Two Six Technologies, Inc.", "VNDTWOSIX001", "8JRL4", ["Two Six Labs", "Two Six Federal"]),
         ("govini", "Govini, Inc.", "VNDGOVINI001", "6J7K1", ["Govini Federal", "Govini Decision Science"]),
         ("metron", "Metron, Inc.", "VNDMETRON001", "0ME73", ["Metron Scientific", "Metron Federal"]),
+        ("keystone_metal", "Keystone Metal Fabrication Shop", "VNDMETAL0001", "9M4T2", [
+            "Keystone Metal Fab",
+            "Keystone Fabrication",
+            "Keystone Precision Weldments",
+            "Keystone Machine and Fab",
+        ]),
     ]
     return [
         {
@@ -475,6 +481,10 @@ def build_workspace_seed(
     tenant_id = stable_uuid("tenant:demo-growth")
     capture_lead_id = stable_uuid("tenant-user:demo-growth:capture.lead@example.com")
     analyst_id = stable_uuid("tenant-user:demo-growth:analyst@example.com")
+    metal_tenant_id = stable_uuid("tenant:metal-fabrication-shop")
+    metal_lead_id = stable_uuid("tenant-user:metal-fabrication-shop:owner@keystonemetal.example")
+    metal_analyst_id = stable_uuid("tenant-user:metal-fabrication-shop:estimator@keystonemetal.example")
+    metal_profile_id = stable_uuid("customer-profile:metal-fabrication-shop:keystone")
 
     tenants = [
         {
@@ -483,7 +493,14 @@ def build_workspace_seed(
             "tenant_name": "Apex Analytica Federal Growth Team",
             "plan_tier": "enterprise",
             "data_region": "us-east-1",
-        }
+        },
+        {
+            "tenant_id": metal_tenant_id,
+            "tenant_slug": "metal-fabrication-shop",
+            "tenant_name": "Keystone Metal Fabrication Shop",
+            "plan_tier": "demo",
+            "data_region": "us-east-1",
+        },
     ]
     tenant_users = [
         {
@@ -500,6 +517,24 @@ def build_workspace_seed(
             "tenant_id": tenant_id,
             "email": "analyst@example.com",
             "display_name": "Market Analyst",
+            "role": "analyst",
+            "status": "active",
+            "last_seen_at": NOW,
+        },
+        {
+            "user_id": metal_lead_id,
+            "tenant_id": metal_tenant_id,
+            "email": "owner@keystonemetal.example",
+            "display_name": "Metal Fabrication Owner",
+            "role": "capture_manager",
+            "status": "active",
+            "last_seen_at": NOW,
+        },
+        {
+            "user_id": metal_analyst_id,
+            "tenant_id": metal_tenant_id,
+            "email": "estimator@keystonemetal.example",
+            "display_name": "Fabrication Estimator",
             "role": "analyst",
             "status": "active",
             "last_seen_at": NOW,
@@ -539,7 +574,41 @@ def build_workspace_seed(
                 "avoid_no_incumbent_access": False,
                 "needs_prime_partner_above": 60000000,
             },
-        }
+        },
+        {
+            "customer_profile_id": metal_profile_id,
+            "tenant_id": metal_tenant_id,
+            "entity_id": entity_ids["Keystone Metal Fabrication Shop"],
+            "company_name": "Keystone Metal Fabrication Shop",
+            "target_naics_codes": ["332312", "332313", "332322", "332710", "332999", "336413"],
+            "target_psc_codes": ["1560", "1730", "5340", "5450", "9520", "9530", "9540"],
+            "target_agency_codes": ["097", "017", "021", "057"],
+            "contract_vehicles": ["DIBBS", "SAM.gov Open Market", "GSA MAS Industrial Products"],
+            "set_aside_eligibilities": ["Small Business"],
+            "clearance_levels": ["Facility access eligible"],
+            "socioeconomic_tags": ["Metal fabrication", "CNC machining", "Welding", "Sheet metal"],
+            "incumbent_agency_codes": ["097", "017"],
+            "past_performance_summary": {
+                "prime_contracts": 4,
+                "subcontracts": 1,
+                "recent_relevant_obligation": 4650000,
+                "strongest_domains": ["fabricated_structural_metal", "machined_components", "defense_spares"],
+                "agency_relationships": {
+                    "097": "DLA small business supplier for fabricated brackets, plates, and repair parts",
+                    "017": "Navy shipboard stainless and aluminum fabrication support",
+                    "021": "Army ground support equipment weldments and assemblies",
+                },
+            },
+            "pricing_strategy": {
+                "target_blend_discount_to_calc_p75": 0.12,
+                "preferred_labor_mix": "journeyman welders, CNC operators, and estimator-led QA",
+            },
+            "risk_preferences": {
+                "max_single_award_value": 8000000,
+                "avoid_no_incumbent_access": True,
+                "needs_prime_partner_above": 12000000,
+            },
+        },
     ]
     workflow_specs = {
         "SAM-2026-C5ISR-AI-001": ("qualifying", "go", "high", "Gate 2: Teaming", "Two Six and Anduril are likely differentiators for tactical edge credibility."),
@@ -605,7 +674,10 @@ def build_workspace_seed(
             "priority": "medium",
         },
     ]
-    customer_past_performance = build_customer_past_performance(tenant_id, customer_profiles[0]["customer_profile_id"])
+    customer_past_performance = (
+        build_customer_past_performance(tenant_id, customer_profiles[0]["customer_profile_id"])
+        + build_metal_fabrication_past_performance(metal_tenant_id, metal_profile_id)
+    )
     billing_accounts = [
         {
             "billing_account_id": stable_uuid(f"billing:{tenant_id}"),
@@ -618,6 +690,19 @@ def build_workspace_seed(
             "trial_ends_at": datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc),
             "current_period_ends_at": datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc),
             "billing_email": "billing@example.com",
+            "source_payload": {"mock_seed": True},
+        },
+        {
+            "billing_account_id": stable_uuid(f"billing:{metal_tenant_id}"),
+            "tenant_id": metal_tenant_id,
+            "billing_provider": "manual",
+            "provider_customer_id": "cus_demo_metal_fabrication",
+            "provider_subscription_id": "sub_demo_metal_fabrication",
+            "subscription_status": "trialing",
+            "price_id": "price_captureos_shop_demo",
+            "trial_ends_at": datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc),
+            "current_period_ends_at": datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc),
+            "billing_email": "billing@keystonemetal.example",
             "source_payload": {"mock_seed": True},
         }
     ]
@@ -674,6 +759,40 @@ def build_customer_past_performance(tenant_id: str, customer_profile_id: str) ->
             "clearance_required": clearance,
             "customer_rating": "Exceptional",
             "source_payload": {"mock_seed": True},
+        }
+        for contract_number, role, prime_name, agency_name_value, agency_code, naics_code, psc_code, title, amount, vehicles, clearance in rows
+    ]
+
+
+def build_metal_fabrication_past_performance(tenant_id: str, customer_profile_id: str) -> List[Dict[str, Any]]:
+    rows = [
+        ("KEY-DLA-24-001", "prime", None, "Defense Logistics Agency", "097", "332710", "5340", "CNC Machined Aluminum Bracket Kits", Decimal("740000.00"), ["DIBBS"], "None"),
+        ("KEY-NAVSEA-23-014", "prime", None, "Department of the Navy", "017", "332312", "5450", "Shipboard Stainless Guard Assemblies", Decimal("1260000.00"), ["SAM.gov Open Market"], "Facility access eligible"),
+        ("KEY-ARMY-25-007", "prime", None, "Department of the Army", "021", "332313", "1730", "Ground Support Equipment Weldments", Decimal("980000.00"), ["SAM.gov Open Market"], "None"),
+        ("KEY-USAF-24-019", "subcontractor", "Aerospace Structures Integrator LLC", "Department of the Air Force", "057", "336413", "1560", "Aircraft Maintenance Stand Components", Decimal("1670000.00"), ["Prime subcontract"], "Facility access eligible"),
+    ]
+    return [
+        {
+            "past_performance_id": stable_uuid(f"past-performance:{contract_number}"),
+            "tenant_id": tenant_id,
+            "customer_profile_id": customer_profile_id,
+            "source": "demo_customer_import",
+            "contract_number": contract_number,
+            "role": role,
+            "prime_name": prime_name,
+            "agency_name": agency_name_value,
+            "agency_code": agency_code,
+            "naics_code": naics_code,
+            "psc_code": psc_code,
+            "title": title,
+            "description": f"{title} delivered with CNC machining, welding, forming, finishing, and quality inspection.",
+            "start_date": date(2024, 1, 1),
+            "end_date": date(2026, 12, 31),
+            "obligated_amount": amount,
+            "contract_vehicles": vehicles,
+            "clearance_required": clearance,
+            "customer_rating": "Exceptional" if "NAVSEA" in contract_number or "USAF" in contract_number else "Very Good",
+            "source_payload": {"mock_seed": True, "business_type": "metal_fabrication"},
         }
         for contract_number, role, prime_name, agency_name_value, agency_code, naics_code, psc_code, title, amount, vehicles, clearance in rows
     ]

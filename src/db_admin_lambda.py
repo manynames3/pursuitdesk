@@ -22,8 +22,8 @@ def lambda_handler(event: Mapping[str, Any], context: Any) -> Dict[str, Any]:
     action = str(event.get("action", "migrate_and_seed"))
     reset = bool(event.get("reset", False))
 
-    if action not in {"migrate", "seed", "migrate_and_seed", "cleanup_sam_mock_seed"}:
-        raise ValueError("action must be one of: migrate, seed, migrate_and_seed, cleanup_sam_mock_seed")
+    if action not in {"migrate", "seed", "migrate_and_seed", "cleanup_sam_mock_seed", "seed_demo_customer_teams"}:
+        raise ValueError("action must be one of: migrate, seed, migrate_and_seed, cleanup_sam_mock_seed, seed_demo_customer_teams")
 
     result: Dict[str, Any] = {"action": action}
 
@@ -35,6 +35,9 @@ def lambda_handler(event: Mapping[str, Any], context: Any) -> Dict[str, Any]:
 
     if action == "cleanup_sam_mock_seed":
         result["cleanup"] = cleanup_sam_mock_seed(os.environ["DATABASE_URL"])
+
+    if action == "seed_demo_customer_teams":
+        result["customer_teams"] = seed_demo_customer_teams(os.environ["DATABASE_URL"])
 
     LOGGER.info("DB admin completed: %s", json.dumps(result, sort_keys=True))
     return result
@@ -141,4 +144,276 @@ def cleanup_sam_mock_seed(database_url: str) -> Dict[str, int]:
         "deleted_sam_mock_opportunities": deleted_opportunities,
         "deleted_sam_mock_freshness_rows": deleted_sam_freshness_rows,
         "live_sam_opportunities": live_sam_opportunities,
+    }
+
+
+def seed_demo_customer_teams(database_url: str) -> Dict[str, int]:
+    with psycopg2.connect(database_url, connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH tenant AS (
+                  INSERT INTO capture.tenants (
+                    tenant_slug, tenant_name, plan_tier, data_region,
+                    auth_provider, required_mfa, data_retention_days, privacy_contact_email
+                  )
+                  VALUES (
+                    'metal-fabrication-shop',
+                    'Keystone Metal Fabrication Shop',
+                    'demo',
+                    'us-east-1',
+                    'demo',
+                    false,
+                    365,
+                    'privacy@keystonemetal.example'
+                  )
+                  ON CONFLICT (tenant_slug)
+                  DO UPDATE SET
+                    tenant_name = EXCLUDED.tenant_name,
+                    plan_tier = EXCLUDED.plan_tier,
+                    data_region = EXCLUDED.data_region,
+                    auth_provider = EXCLUDED.auth_provider,
+                    required_mfa = EXCLUDED.required_mfa,
+                    data_retention_days = EXCLUDED.data_retention_days,
+                    privacy_contact_email = EXCLUDED.privacy_contact_email,
+                    updated_at = now()
+                  RETURNING tenant_id
+                ),
+                entity AS (
+                  INSERT INTO capture.entities (
+                    legal_name, alias_names, source_system, source_payload
+                  )
+                  VALUES (
+                    'Keystone Metal Fabrication Shop',
+                    ARRAY[
+                      'Keystone Metal Fab',
+                      'Keystone Fabrication',
+                      'Keystone Precision Weldments',
+                      'Keystone Machine and Fab'
+                    ]::text[],
+                    'manual_import',
+                    '{"demo_customer_profile": true, "business_type": "metal_fabrication"}'::jsonb
+                  )
+                  ON CONFLICT (normalized_legal_name)
+                  DO UPDATE SET
+                    alias_names = EXCLUDED.alias_names,
+                    source_system = EXCLUDED.source_system,
+                    source_payload = capture.entities.source_payload || EXCLUDED.source_payload,
+                    updated_at = now()
+                  RETURNING entity_id
+                ),
+                lead_user AS (
+                  INSERT INTO capture.tenant_users (
+                    tenant_id, email, display_name, role, status, last_seen_at
+                  )
+                  SELECT
+                    tenant.tenant_id,
+                    'owner@keystonemetal.example',
+                    'Metal Fabrication Owner',
+                    'capture_manager',
+                    'active',
+                    now()
+                  FROM tenant
+                  ON CONFLICT (tenant_id, (lower(email)))
+                  DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    role = EXCLUDED.role,
+                    status = EXCLUDED.status,
+                    last_seen_at = EXCLUDED.last_seen_at,
+                    updated_at = now()
+                  RETURNING user_id
+                ),
+                analyst_user AS (
+                  INSERT INTO capture.tenant_users (
+                    tenant_id, email, display_name, role, status, last_seen_at
+                  )
+                  SELECT
+                    tenant.tenant_id,
+                    'estimator@keystonemetal.example',
+                    'Fabrication Estimator',
+                    'analyst',
+                    'active',
+                    now()
+                  FROM tenant
+                  ON CONFLICT (tenant_id, (lower(email)))
+                  DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    role = EXCLUDED.role,
+                    status = EXCLUDED.status,
+                    last_seen_at = EXCLUDED.last_seen_at,
+                    updated_at = now()
+                  RETURNING user_id
+                ),
+                profile AS (
+                  INSERT INTO capture.customer_profiles (
+                    tenant_id, entity_id, company_name, target_naics_codes,
+                    target_psc_codes, target_agency_codes, contract_vehicles,
+                    set_aside_eligibilities, clearance_levels, socioeconomic_tags,
+                    incumbent_agency_codes, past_performance_summary,
+                    pricing_strategy, risk_preferences
+                  )
+                  SELECT
+                    tenant.tenant_id,
+                    entity.entity_id,
+                    'Keystone Metal Fabrication Shop',
+                    ARRAY['332312','332313','332322','332710','332999','336413']::text[],
+                    ARRAY['1560','1730','5340','5450','9520','9530','9540']::text[],
+                    ARRAY['097','017','021','057']::text[],
+                    ARRAY['DIBBS', 'SAM.gov Open Market', 'GSA MAS Industrial Products']::text[],
+                    ARRAY['Small Business']::text[],
+                    ARRAY['Facility access eligible']::text[],
+                    ARRAY['Metal fabrication', 'CNC machining', 'Welding', 'Sheet metal']::text[],
+                    ARRAY['097','017']::text[],
+                    '{
+                      "prime_contracts": 4,
+                      "subcontracts": 1,
+                      "recent_relevant_obligation": 4650000,
+                      "strongest_domains": ["fabricated_structural_metal", "machined_components", "defense_spares"],
+                      "agency_relationships": {
+                        "097": "DLA small business supplier for fabricated brackets, plates, and repair parts",
+                        "017": "Navy shipboard stainless and aluminum fabrication support",
+                        "021": "Army ground support equipment weldments and assemblies"
+                      }
+                    }'::jsonb,
+                    '{
+                      "target_blend_discount_to_calc_p75": 0.12,
+                      "preferred_labor_mix": "journeyman welders, CNC operators, and estimator-led QA"
+                    }'::jsonb,
+                    '{
+                      "max_single_award_value": 8000000,
+                      "avoid_no_incumbent_access": true,
+                      "needs_prime_partner_above": 12000000
+                    }'::jsonb
+                  FROM tenant
+                  CROSS JOIN entity
+                  ON CONFLICT (tenant_id, company_name)
+                  DO UPDATE SET
+                    entity_id = EXCLUDED.entity_id,
+                    target_naics_codes = EXCLUDED.target_naics_codes,
+                    target_psc_codes = EXCLUDED.target_psc_codes,
+                    target_agency_codes = EXCLUDED.target_agency_codes,
+                    contract_vehicles = EXCLUDED.contract_vehicles,
+                    set_aside_eligibilities = EXCLUDED.set_aside_eligibilities,
+                    clearance_levels = EXCLUDED.clearance_levels,
+                    socioeconomic_tags = EXCLUDED.socioeconomic_tags,
+                    incumbent_agency_codes = EXCLUDED.incumbent_agency_codes,
+                    past_performance_summary = EXCLUDED.past_performance_summary,
+                    pricing_strategy = EXCLUDED.pricing_strategy,
+                    risk_preferences = EXCLUDED.risk_preferences,
+                    updated_at = now()
+                  RETURNING customer_profile_id, tenant_id
+                ),
+                past_performance_rows AS (
+                  SELECT *
+                  FROM (
+                    VALUES
+                      ('KEY-DLA-24-001', 'prime', NULL, 'Defense Logistics Agency', '097', '332710', '5340', 'CNC Machined Aluminum Bracket Kits', 'Precision machined and anodized aluminum bracket kits for depot-level repair stock.', 740000.00, ARRAY['DIBBS']::text[], 'None', 'Very Good'),
+                      ('KEY-NAVSEA-23-014', 'prime', NULL, 'Department of the Navy', '017', '332312', '5450', 'Shipboard Stainless Guard Assemblies', 'Welded stainless guard, ladder, and access assemblies for ship maintenance availability.', 1260000.00, ARRAY['SAM.gov Open Market']::text[], 'Facility access eligible', 'Exceptional'),
+                      ('KEY-ARMY-25-007', 'prime', NULL, 'Department of the Army', '021', '332313', '1730', 'Ground Support Equipment Weldments', 'Fabricated steel weldments, powder coating, and dimensional inspection for ground support fixtures.', 980000.00, ARRAY['SAM.gov Open Market']::text[], 'None', 'Very Good'),
+                      ('KEY-USAF-24-019', 'subcontractor', 'Aerospace Structures Integrator LLC', 'Department of the Air Force', '057', '336413', '1560', 'Aircraft Maintenance Stand Components', 'Laser-cut panels, formed sheet metal components, and welded subassemblies for maintenance stands.', 1670000.00, ARRAY['Prime subcontract']::text[], 'Facility access eligible', 'Exceptional')
+                  ) AS rows(
+                    contract_number, role, prime_name, agency_name, agency_code,
+                    naics_code, psc_code, title, description, obligated_amount,
+                    contract_vehicles, clearance_required, customer_rating
+                  )
+                ),
+                upsert_past_performance AS (
+                  INSERT INTO capture.customer_past_performance (
+                    tenant_id, customer_profile_id, source, contract_number,
+                    role, prime_name, agency_name, agency_code, naics_code,
+                    psc_code, title, description, start_date, end_date,
+                    obligated_amount, contract_vehicles, clearance_required,
+                    customer_rating, source_payload
+                  )
+                  SELECT
+                    profile.tenant_id,
+                    profile.customer_profile_id,
+                    'demo_customer_import',
+                    rows.contract_number,
+                    rows.role,
+                    rows.prime_name,
+                    rows.agency_name,
+                    rows.agency_code,
+                    rows.naics_code,
+                    rows.psc_code,
+                    rows.title,
+                    rows.description,
+                    DATE '2024-01-01',
+                    DATE '2026-12-31',
+                    rows.obligated_amount,
+                    rows.contract_vehicles,
+                    rows.clearance_required,
+                    rows.customer_rating,
+                    jsonb_build_object('demo_customer_profile', true, 'business_type', 'metal_fabrication')
+                  FROM profile
+                  CROSS JOIN past_performance_rows rows
+                  ON CONFLICT (tenant_id, contract_number, role)
+                  DO UPDATE SET
+                    customer_profile_id = EXCLUDED.customer_profile_id,
+                    source = EXCLUDED.source,
+                    prime_name = EXCLUDED.prime_name,
+                    agency_name = EXCLUDED.agency_name,
+                    agency_code = EXCLUDED.agency_code,
+                    naics_code = EXCLUDED.naics_code,
+                    psc_code = EXCLUDED.psc_code,
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    start_date = EXCLUDED.start_date,
+                    end_date = EXCLUDED.end_date,
+                    obligated_amount = EXCLUDED.obligated_amount,
+                    contract_vehicles = EXCLUDED.contract_vehicles,
+                    clearance_required = EXCLUDED.clearance_required,
+                    customer_rating = EXCLUDED.customer_rating,
+                    source_payload = EXCLUDED.source_payload,
+                    updated_at = now()
+                  RETURNING past_performance_id
+                ),
+                upsert_billing AS (
+                  INSERT INTO capture.billing_accounts (
+                    tenant_id, billing_provider, provider_customer_id,
+                    provider_subscription_id, subscription_status, price_id,
+                    trial_ends_at, current_period_ends_at, billing_email,
+                    source_payload
+                  )
+                  SELECT
+                    tenant.tenant_id,
+                    'manual',
+                    'cus_demo_metal_fabrication',
+                    'sub_demo_metal_fabrication',
+                    'trialing',
+                    'price_captureos_shop_demo',
+                    now() + INTERVAL '30 days',
+                    now() + INTERVAL '30 days',
+                    'billing@keystonemetal.example',
+                    '{"demo_customer_profile": true}'::jsonb
+                  FROM tenant
+                  ON CONFLICT (tenant_id)
+                  DO UPDATE SET
+                    billing_provider = EXCLUDED.billing_provider,
+                    provider_customer_id = EXCLUDED.provider_customer_id,
+                    provider_subscription_id = EXCLUDED.provider_subscription_id,
+                    subscription_status = EXCLUDED.subscription_status,
+                    price_id = EXCLUDED.price_id,
+                    trial_ends_at = EXCLUDED.trial_ends_at,
+                    current_period_ends_at = EXCLUDED.current_period_ends_at,
+                    billing_email = EXCLUDED.billing_email,
+                    source_payload = EXCLUDED.source_payload,
+                    updated_at = now()
+                  RETURNING billing_account_id
+                )
+                SELECT
+                  (SELECT count(*) FROM tenant)::int AS tenants,
+                  (SELECT count(*) FROM profile)::int AS customer_profiles,
+                  (SELECT count(*) FROM lead_user)::int + (SELECT count(*) FROM analyst_user)::int AS tenant_users,
+                  (SELECT count(*) FROM upsert_past_performance)::int AS past_performance_rows,
+                  (SELECT count(*) FROM upsert_billing)::int AS billing_accounts;
+                """
+            )
+            row = cur.fetchone()
+    return {
+        "tenants": int(row[0]),
+        "customer_profiles": int(row[1]),
+        "tenant_users": int(row[2]),
+        "past_performance_rows": int(row[3]),
+        "billing_accounts": int(row[4]),
     }

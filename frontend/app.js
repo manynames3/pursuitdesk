@@ -32,6 +32,31 @@ const fallbackOpportunities = [
   },
 ];
 
+const fallbackTeams = [
+  {
+    tenant_slug: "demo-growth",
+    tenant_name: "Apex Analytica Federal Growth Team",
+    company_name: "Apex Analytica Federal Growth Team",
+    user_email: "capture.lead@example.com",
+    contract_vehicles: ["GSA MAS IT", "OASIS+"],
+    clearance_levels: ["Secret"],
+    set_aside_eligibilities: ["Small Business"],
+    target_naics_codes: ["541512", "541511", "541715"],
+    target_psc_codes: ["DA01", "DA10", "AC12", "R425"],
+  },
+  {
+    tenant_slug: "metal-fabrication-shop",
+    tenant_name: "Keystone Metal Fabrication Shop",
+    company_name: "Keystone Metal Fabrication Shop",
+    user_email: "owner@keystonemetal.example",
+    contract_vehicles: ["DIBBS", "SAM.gov Open Market", "GSA MAS Industrial Products"],
+    clearance_levels: ["Facility access eligible"],
+    set_aside_eligibilities: ["Small Business"],
+    target_naics_codes: ["332312", "332313", "332322", "332710", "332999", "336413"],
+    target_psc_codes: ["1560", "1730", "5340", "5450", "9520", "9530", "9540"],
+  },
+];
+
 const fallbackAnalysis = {
   opportunity: fallbackOpportunities[0],
   customer_profile: {
@@ -93,10 +118,13 @@ let currentOpportunityId = null;
 let currentAnalysis = null;
 let loadedOpportunities = [];
 let totalOpportunities = 0;
+let customerTeams = [...fallbackTeams];
+let selectedTenantSlug = localStorage.getItem("captureosTenantSlug") || "demo-growth";
 
 const els = {
   apiStatus: document.querySelector("#api-status"),
   securityStatus: document.querySelector("#security-status"),
+  teamSelect: document.querySelector("#team-select"),
   refresh: document.querySelector("#refresh"),
   trackGo: document.querySelector("#track-go"),
   trackNoGo: document.querySelector("#track-no-go"),
@@ -130,13 +158,46 @@ const els = {
   notes: document.querySelector("#notes"),
 };
 
+els.teamSelect.addEventListener("change", async () => {
+  selectedTenantSlug = els.teamSelect.value;
+  localStorage.setItem("captureosTenantSlug", selectedTenantSlug);
+  currentOpportunityId = null;
+  currentAnalysis = null;
+  await loadOpportunities({ append: false });
+});
 els.refresh.addEventListener("click", () => loadOpportunities({ append: false }));
 els.loadMore.addEventListener("click", () => loadOpportunities({ append: true }));
 els.trackGo.addEventListener("click", () => updateWorkflow("go"));
 els.trackNoGo.addEventListener("click", () => updateWorkflow("no_go"));
 els.exportBrief.addEventListener("click", exportBrief);
 
-loadOpportunities({ append: false });
+initialize();
+
+async function initialize() {
+  await loadCustomerTeams();
+  await loadOpportunities({ append: false });
+}
+
+async function loadCustomerTeams() {
+  try {
+    const data = await fetchJson(`${apiBaseUrl}/api/v1/customer-teams`);
+    customerTeams = data.items?.length ? data.items.map(normalizeTeam) : [...fallbackTeams];
+  } catch (error) {
+    customerTeams = [...fallbackTeams];
+  }
+  if (!customerTeams.some((team) => team.tenant_slug === selectedTenantSlug)) {
+    selectedTenantSlug = customerTeams[0]?.tenant_slug || "demo-growth";
+    localStorage.setItem("captureosTenantSlug", selectedTenantSlug);
+  }
+  renderTeamSelect();
+}
+
+function renderTeamSelect() {
+  els.teamSelect.innerHTML = customerTeams.map((team) => (
+    `<option value="${escapeHtml(team.tenant_slug)}">${escapeHtml(team.tenant_name || team.company_name)}</option>`
+  )).join("");
+  els.teamSelect.value = selectedTenantSlug;
+}
 
 async function loadOpportunities({ append = false } = {}) {
   const offset = append ? loadedOpportunities.length : 0;
@@ -194,19 +255,20 @@ async function loadAnalysis(opportunityId) {
     data = await fetchJson(`${apiBaseUrl}/api/v1/capture-analysis/${encodeURIComponent(opportunityId)}`);
     setApiStatus("Live API");
   } catch (error) {
+    const fallback = buildFallbackAnalysis(selectedOpportunity, opportunityId);
     data = {
-      ...fallbackAnalysis,
-      opportunity: selectedOpportunity || fallbackOpportunities.find((item) => item.opportunity_id === opportunityId) || fallbackAnalysis.opportunity,
-      competing_primes: selectedOpportunity ? [] : fallbackAnalysis.competing_primes,
-      target_teaming_subs: selectedOpportunity ? [] : fallbackAnalysis.target_teaming_subs,
+      ...fallback,
+      opportunity: selectedOpportunity || fallbackOpportunities.find((item) => item.opportunity_id === opportunityId) || fallback.opportunity,
+      competing_primes: selectedOpportunity ? [] : fallback.competing_primes,
+      target_teaming_subs: selectedOpportunity ? [] : fallback.target_teaming_subs,
       competitive_baseline: selectedOpportunity
         ? {
-            estimated_p_win: 0.18,
+            estimated_p_win: selectedTenantSlug === "metal-fabrication-shop" ? 0.22 : 0.18,
             confidence: "low",
             historical_match_count: 0,
             total_matched_obligation: 0,
           }
-        : fallbackAnalysis.competitive_baseline,
+        : fallback.competitive_baseline,
       evidence: selectedOpportunity
         ? {
             coverage: { opportunity: 1 },
@@ -222,7 +284,7 @@ async function loadAnalysis(opportunityId) {
             }],
             score_factors: [],
           }
-        : fallbackAnalysis.evidence,
+        : fallback.evidence,
     };
     setApiStatus("Local demo data");
   }
@@ -268,10 +330,10 @@ async function updateWorkflow(goNoGo) {
 
 async function exportBrief() {
   if (!currentOpportunityId) return;
-  const fallback = () => downloadText(renderLocalBrief(currentAnalysis || fallbackAnalysis), `capture-brief-${currentOpportunityId}.md`);
+  const fallback = () => downloadText(renderLocalBrief(currentAnalysis || buildFallbackAnalysis()), `capture-brief-${currentOpportunityId}.md`);
   try {
     const response = await fetch(`${apiBaseUrl}/api/v1/capture-analysis/${encodeURIComponent(currentOpportunityId)}/brief.md`, {
-      headers: { accept: "text/markdown" },
+      headers: requestHeaders({ accept: "text/markdown" }),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     downloadText(await response.text(), `capture-brief-${currentOpportunityId}.md`);
@@ -578,11 +640,77 @@ function setApiStatus(text) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, { headers: { accept: "application/json", ...(options.headers || {}) }, ...options });
+  const response = await fetch(url, { ...options, headers: requestHeaders({ accept: "application/json", ...(options.headers || {}) }) });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
   return response.json();
+}
+
+function requestHeaders(headers = {}) {
+  const team = selectedTeam();
+  return {
+    "x-captureos-tenant": selectedTenantSlug,
+    "x-captureos-user": team.user_email || "capture.lead@example.com",
+    ...headers,
+  };
+}
+
+function selectedTeam() {
+  return customerTeams.find((team) => team.tenant_slug === selectedTenantSlug) || customerTeams[0] || fallbackTeams[0];
+}
+
+function normalizeTeam(team) {
+  const fallback = fallbackTeams.find((item) => item.tenant_slug === team.tenant_slug) || {};
+  return {
+    ...fallback,
+    ...team,
+    company_name: team.company_name || team.tenant_name || fallback.company_name,
+    tenant_name: team.tenant_name || team.company_name || fallback.tenant_name,
+  };
+}
+
+function buildFallbackAnalysis(opportunity = null) {
+  const team = selectedTeam();
+  const isMetalShop = team.tenant_slug === "metal-fabrication-shop";
+  const factors = isMetalShop
+    ? [
+        { label: "NAICS fit", score: 0.72, evidence: `Profile targets ${shortList(team.target_naics_codes)}` },
+        { label: "PSC fit", score: 0.68, evidence: `Profile targets ${shortList(team.target_psc_codes)}` },
+        { label: "Agency relationship", score: 0.64, evidence: "DLA, Navy, Army, and Air Force fabrication history" },
+        { label: "Deal size fit", score: 0.84, evidence: "Profile max single award $8M" },
+      ]
+    : fallbackAnalysis.customer_score.factors;
+  return {
+    ...fallbackAnalysis,
+    opportunity: opportunity || fallbackAnalysis.opportunity,
+    customer_profile: {
+      ...fallbackAnalysis.customer_profile,
+      ...team,
+    },
+    customer_score: {
+      ...fallbackAnalysis.customer_score,
+      company_adjusted_p_win: isMetalShop ? 0.22 : fallbackAnalysis.customer_score.company_adjusted_p_win,
+      delta_vs_market: isMetalShop ? 0.06 : fallbackAnalysis.customer_score.delta_vs_market,
+      profile_fit_score: isMetalShop ? 0.72 : fallbackAnalysis.customer_score.profile_fit_score,
+      factors,
+    },
+    competitive_baseline: {
+      ...fallbackAnalysis.competitive_baseline,
+      estimated_p_win: isMetalShop ? 0.22 : fallbackAnalysis.competitive_baseline.estimated_p_win,
+    },
+    past_performance: isMetalShop
+      ? [
+          { contract_number: "KEY-NAVSEA-23-014", title: "Shipboard Stainless Guard Assemblies", role: "prime", agency_name: "Department of the Navy", obligated_amount: 1260000 },
+          { contract_number: "KEY-DLA-24-001", title: "CNC Machined Aluminum Bracket Kits", role: "prime", agency_name: "Defense Logistics Agency", obligated_amount: 740000 },
+        ]
+      : fallbackAnalysis.past_performance,
+    security_context: {
+      tenant_name: team.tenant_name || team.company_name,
+      role: "capture_manager",
+      auth_mode: "demo_header_context",
+    },
+  };
 }
 
 function splitCodes(value) {

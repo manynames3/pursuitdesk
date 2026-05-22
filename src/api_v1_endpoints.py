@@ -131,6 +131,7 @@ def get_db_connection() -> Generator[Any, None, None]:
 
 @router.get("/opportunities/active")
 def list_active_opportunities(
+    request: Request,
     min_value: Optional[Decimal] = Query(None, ge=0),
     max_value: Optional[Decimal] = Query(None, ge=0),
     naics_codes: Optional[List[str]] = Query(None, description="Repeat or comma-separate NAICS codes."),
@@ -146,6 +147,11 @@ def list_active_opportunities(
     naics = _clean_code_list(naics_codes, allowed_lengths={2, 3, 4, 5, 6}, digits_only=True)
     psc = _clean_code_list(psc_codes, allowed_lengths={1, 2, 3, 4}, digits_only=False)
     search_text = q.strip() if q else None
+    context = _load_request_context(conn, request)
+    customer_profile = _fetch_customer_profile(conn, context.get("tenant_id"))
+    profile_naics = customer_profile.get("target_naics_codes") or []
+    profile_psc = customer_profile.get("target_psc_codes") or []
+    profile_agencies = customer_profile.get("target_agency_codes") or []
 
     sql = """
     WITH filtered AS (
@@ -173,6 +179,9 @@ def list_active_opportunities(
           + CASE WHEN o.estimated_value_max IS NOT NULL OR o.estimated_value_min IS NOT NULL THEN 0.14 ELSE 0 END
           + CASE WHEN %(naics_codes)s::text[] IS NOT NULL AND o.naics_code = ANY(%(naics_codes)s::text[]) THEN 0.18 ELSE 0 END
           + CASE WHEN %(psc_codes)s::text[] IS NOT NULL AND o.psc_code = ANY(%(psc_codes)s::text[]) THEN 0.12 ELSE 0 END
+          + CASE WHEN %(profile_naics_codes)s::text[] IS NOT NULL AND o.naics_code = ANY(%(profile_naics_codes)s::text[]) THEN 0.16 ELSE 0 END
+          + CASE WHEN %(profile_psc_codes)s::text[] IS NOT NULL AND o.psc_code = ANY(%(profile_psc_codes)s::text[]) THEN 0.12 ELSE 0 END
+          + CASE WHEN %(profile_agency_codes)s::text[] IS NOT NULL AND o.funding_agency_code = ANY(%(profile_agency_codes)s::text[]) THEN 0.08 ELSE 0 END
           + CASE
               WHEN o.posted_at IS NULL THEN 0.03
               ELSE LEAST(0.06, GREATEST(0, 0.06 - EXTRACT(day FROM now() - o.posted_at) * 0.002))
@@ -203,6 +212,9 @@ def list_active_opportunities(
         "max_value": max_value,
         "naics_codes": naics or None,
         "psc_codes": psc or None,
+        "profile_naics_codes": profile_naics or None,
+        "profile_psc_codes": profile_psc or None,
+        "profile_agency_codes": profile_agencies or None,
         "search_text": search_text,
         "limit": limit,
         "offset": offset,
@@ -221,9 +233,16 @@ def list_active_opportunities(
             "naics_codes": naics,
             "psc_codes": psc,
             "q": search_text,
+            "team": context.get("tenant_slug"),
         },
+        "customer_profile": customer_profile,
         "items": [_opportunity_row(row) for row in rows],
     }
+
+
+@router.get("/customer-teams")
+def list_customer_teams(conn=Depends(get_db_connection)) -> Dict[str, Any]:
+    return {"items": _fetch_customer_teams(conn)}
 
 
 @router.get("/capture-analysis/{opportunity_id}")
@@ -259,6 +278,7 @@ def get_workspace_summary(request: Request, conn=Depends(get_db_connection)) -> 
     profile = _fetch_customer_profile(conn, tenant_id)
     return {
         "security_context": context,
+        "customer_teams": _fetch_customer_teams(conn),
         "customer_profile": profile,
         "data_freshness": _fetch_data_freshness(conn),
         "competitor_watchlist": _fetch_competitor_watchlist(conn, tenant_id),
@@ -658,6 +678,44 @@ def _fetch_customer_profile(conn, tenant_id: Optional[str]) -> Dict[str, Any]:
             return {}
         raise
     return _json_safe(dict(row)) if row else {}
+
+
+def _fetch_customer_teams(conn) -> List[Dict[str, Any]]:
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (t.tenant_id)
+                  t.tenant_id::text,
+                  t.tenant_slug,
+                  t.tenant_name,
+                  t.plan_tier,
+                  cp.customer_profile_id::text,
+                  cp.company_name,
+                  cp.target_naics_codes,
+                  cp.target_psc_codes,
+                  cp.target_agency_codes,
+                  cp.contract_vehicles,
+                  cp.set_aside_eligibilities,
+                  cp.clearance_levels,
+                  cp.past_performance_summary,
+                  cp.risk_preferences,
+                  cp.updated_at
+                FROM capture.tenants t
+                JOIN capture.customer_profiles cp ON cp.tenant_id = t.tenant_id
+                WHERE t.plan_tier IN ('demo', 'team', 'enterprise')
+                ORDER BY t.tenant_id, cp.updated_at DESC;
+                """
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return []
+        raise
+
+    teams = [_json_safe(dict(row)) for row in rows]
+    return sorted(teams, key=lambda row: (row.get("tenant_name") or "").lower())
 
 
 def _fetch_workflow(conn, tenant_id: Optional[str], opportunity_id: str) -> Dict[str, Any]:
@@ -1784,7 +1842,10 @@ def _default_labor_categories(opportunity: Mapping[str, Any]) -> List[str]:
 def _opportunity_predicate(opportunity_id: str) -> tuple[str, Dict[str, str]]:
     try:
         parsed = UUID(str(opportunity_id))
-        return "opportunity_id = %(opportunity_uuid)s::uuid", {"opportunity_uuid": str(parsed)}
+        return (
+            "(opportunity_id = %(opportunity_uuid)s::uuid OR notice_id = %(notice_id)s)",
+            {"opportunity_uuid": str(parsed), "notice_id": opportunity_id},
+        )
     except ValueError:
         return "notice_id = %(notice_id)s", {"notice_id": opportunity_id}
 

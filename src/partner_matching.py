@@ -446,7 +446,10 @@ def _fetch_target(conn, target_predicate: str, params: Mapping[str, Any]) -> Opt
 def _target_predicate(opportunity_id: str) -> Tuple[str, Dict[str, Any]]:
     try:
         parsed = uuid.UUID(str(opportunity_id))
-        return "opportunity_id = %(opportunity_uuid)s::uuid", {"opportunity_uuid": str(parsed)}
+        return (
+            "(opportunity_id = %(opportunity_uuid)s::uuid OR notice_id = %(notice_id)s)",
+            {"opportunity_uuid": str(parsed), "notice_id": str(opportunity_id)},
+        )
     except ValueError:
         return "notice_id = %(notice_id)s", {"notice_id": str(opportunity_id)}
 

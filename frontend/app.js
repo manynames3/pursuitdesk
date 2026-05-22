@@ -193,6 +193,7 @@ function buildOpportunityParams(offset) {
 async function loadAnalysis(opportunityId) {
   currentOpportunityId = opportunityId;
   setActiveOpportunity(opportunityId);
+  const selectedOpportunity = findLoadedOpportunity(opportunityId);
   let data;
   try {
     data = await fetchJson(`${apiBaseUrl}/api/v1/capture-analysis/${encodeURIComponent(opportunityId)}`);
@@ -200,12 +201,45 @@ async function loadAnalysis(opportunityId) {
   } catch (error) {
     data = {
       ...fallbackAnalysis,
-      opportunity: fallbackOpportunities.find((item) => item.opportunity_id === opportunityId) || fallbackAnalysis.opportunity,
+      opportunity: selectedOpportunity || fallbackOpportunities.find((item) => item.opportunity_id === opportunityId) || fallbackAnalysis.opportunity,
+      competing_primes: selectedOpportunity ? [] : fallbackAnalysis.competing_primes,
+      target_teaming_subs: selectedOpportunity ? [] : fallbackAnalysis.target_teaming_subs,
+      competitive_baseline: selectedOpportunity
+        ? {
+            estimated_p_win: 0.18,
+            confidence: "low",
+            historical_match_count: 0,
+            total_matched_obligation: 0,
+          }
+        : fallbackAnalysis.competitive_baseline,
+      evidence: selectedOpportunity
+        ? {
+            coverage: { opportunity: 1 },
+            items: [{
+              evidence_type: "opportunity",
+              source_system: "SAM.gov",
+              source_title: selectedOpportunity.title,
+              source_url: selectedOpportunity.ui_link,
+              source_record_date: selectedOpportunity.posted_at,
+              naics_code: selectedOpportunity.naics_code,
+              psc_code: selectedOpportunity.psc_code,
+              explanation: "Live SAM.gov opportunity selected; full capture analysis is pending enrichment.",
+            }],
+            score_factors: [],
+          }
+        : fallbackAnalysis.evidence,
     };
     setApiStatus("Local demo data");
   }
   currentAnalysis = data;
   renderAnalysis(data);
+}
+
+function findLoadedOpportunity(opportunityId) {
+  return loadedOpportunities.find((item) => (
+    item.opportunity_id === opportunityId
+    || item.notice_id === opportunityId
+  ));
 }
 
 async function updateWorkflow(goNoGo) {

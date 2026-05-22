@@ -427,6 +427,14 @@ def _build_capture_analysis_response(
             )
             benchmarks = _fetch_calc_benchmarks(conn, opportunity_id=opportunity_id, max_rows=12)
     except ValueError as exc:
+        if "has no sow_embedding" in str(exc):
+            return _build_structural_capture_response(
+                request=request,
+                conn=conn,
+                opportunity_id=opportunity_id,
+                context=context,
+                customer_profile=customer_profile,
+            )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except psycopg2.errors.QueryCanceled as exc:
         raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Capture analysis query timed out.") from exc
@@ -455,6 +463,53 @@ def _build_capture_analysis_response(
         "limits": {"top_primes": 3, "top_subcontractors": 5, "calc_benchmarks": 12},
     }
     return response
+
+
+def _build_structural_capture_response(
+    request: Request,
+    conn,
+    opportunity_id: str,
+    context: Mapping[str, Any],
+    customer_profile: Mapping[str, Any],
+) -> Dict[str, Any]:
+    opportunity = _fetch_opportunity_detail(conn, opportunity_id)
+    if opportunity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Opportunity was not found: {opportunity_id}")
+
+    benchmarks = _fetch_calc_benchmarks(conn, opportunity_id=opportunity_id, max_rows=12)
+    baseline = _structural_opportunity_baseline(customer_profile, opportunity)
+    market_baseline = {
+        "estimated_p_win": 0.18,
+        "confidence": "low",
+        "model_scope": "live_sam_structural_only",
+        "historical_match_count": 0,
+        "total_matched_obligation": 0,
+    }
+    response: Dict[str, Any] = {
+        "opportunity": opportunity,
+        "competing_primes": [],
+        "target_teaming_subs": [],
+        "competitive_baseline": baseline,
+        "market_baseline": market_baseline,
+        "calc_plus_benchmarks": benchmarks,
+        "customer_profile": customer_profile,
+        "customer_score": _customer_score_breakdown(customer_profile, opportunity, baseline, market_baseline),
+        "workflow": _fetch_workflow(conn, context.get("tenant_id"), opportunity["opportunity_id"]),
+        "notes": _fetch_notes(conn, context.get("tenant_id"), opportunity["opportunity_id"], limit=5),
+        "past_performance": _fetch_past_performance(conn, context.get("tenant_id"), limit=8),
+        "billing": _fetch_billing_account(conn, context.get("tenant_id")),
+        "compliance_controls": _fetch_compliance_controls(conn),
+        "evidence": _live_opportunity_evidence(opportunity, baseline),
+        "data_freshness": _fetch_data_freshness(conn),
+        "security_context": context,
+        "metadata": {
+            "api_version": "v1",
+            "request_id": request.headers.get("x-request-id"),
+            "limits": {"top_primes": 3, "top_subcontractors": 5, "calc_benchmarks": 12},
+            "analysis_mode": "structural_only_pending_embedding",
+        },
+    }
+    return _json_safe(response)
 
 
 def _load_request_context(conn, request: Request) -> Dict[str, Any]:
@@ -1326,6 +1381,135 @@ def _customer_score_breakdown(
         "profile_fit_score": round(fit_score, 3),
         "model_scope": company_baseline.get("model_scope"),
         "factors": factors,
+    }
+
+
+def _structural_opportunity_baseline(
+    profile: Mapping[str, Any],
+    opportunity: Mapping[str, Any],
+) -> Dict[str, Any]:
+    target_naics = set(profile.get("target_naics_codes") or [])
+    target_psc = set(profile.get("target_psc_codes") or [])
+    target_agencies = set(profile.get("target_agency_codes") or [])
+    incumbent_agencies = set(profile.get("incumbent_agency_codes") or [])
+    naics_signal = 1.0 if opportunity.get("naics_code") in target_naics else 0.0
+    psc_signal = 1.0 if opportunity.get("psc_code") in target_psc else 0.0
+    agency_signal = (
+        1.0
+        if opportunity.get("funding_agency_code") in incumbent_agencies
+        else (0.65 if opportunity.get("funding_agency_code") in target_agencies else 0.0)
+    )
+    source_signal = 1.0 if opportunity.get("ui_link") or opportunity.get("description_url") else 0.3
+    estimate = 0.14 + 0.12 * naics_signal + 0.08 * psc_signal + 0.10 * agency_signal + 0.02 * source_signal
+    return {
+        "estimated_p_win": round(min(0.48, max(0.08, estimate)), 3),
+        "confidence": "low",
+        "model_scope": "live_sam_structural_only_pending_embedding",
+        "historical_match_count": 0,
+        "competing_prime_count": 0,
+        "total_matched_obligation": 0,
+        "score_inputs": {
+            "naics_match_rate": naics_signal,
+            "psc_match_rate": psc_signal,
+            "agency_match_rate": agency_signal,
+            "source_record_signal": source_signal,
+            "avg_match_score": 0,
+            "avg_semantic_similarity": 0,
+            "partner_depth_score": 0,
+            "incumbent_concentration": 0,
+            "our_relevance_signal": round((naics_signal + psc_signal + agency_signal) / 3, 3),
+        },
+        "score_weights": {
+            "naics_match": 0.12,
+            "psc_match": 0.08,
+            "agency_match": 0.10,
+            "source_record_signal": 0.02,
+            "semantic_and_structural_fit": 0,
+            "available_partner_depth": 0,
+            "incumbent_concentration_penalty": 0,
+            "company_relevance_signal": 0,
+        },
+        "notes": [
+            "Live SAM.gov record does not yet have a generated SOW embedding, so this analysis uses structural signals only.",
+            "Run document parsing/embedding enrichment to unlock competitor and subcontractor graph matching.",
+        ],
+    }
+
+
+def _fetch_opportunity_detail(conn, opportunity_id: str) -> Optional[Dict[str, Any]]:
+    predicate, params = _opportunity_predicate(opportunity_id)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            SELECT
+              opportunity_id::text,
+              notice_id,
+              solicitation_number,
+              title,
+              opportunity_type,
+              base_type,
+              active_status,
+              posted_at,
+              response_deadline,
+              archive_at,
+              naics_code,
+              psc_code,
+              set_aside_code,
+              set_aside_description,
+              funding_agency_name,
+              funding_agency_code,
+              subtier_name,
+              office_name,
+              full_parent_path_name,
+              full_parent_path_code,
+              organization_type,
+              place_of_performance,
+              office_address,
+              estimated_value_min,
+              estimated_value_max,
+              currency_code,
+              description_url,
+              ui_link,
+              resource_links,
+              sow_text,
+              source_payload,
+              source_updated_at
+            FROM capture.opportunities
+            WHERE {predicate}
+            LIMIT 1;
+            """,
+            params,
+        )
+        row = cur.fetchone()
+    return _json_safe(dict(row)) if row else None
+
+
+def _live_opportunity_evidence(
+    opportunity: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+) -> Dict[str, Any]:
+    item = {
+        "evidence_id": f"live-sam-{opportunity.get('notice_id')}",
+        "opportunity_id": opportunity.get("opportunity_id"),
+        "evidence_type": "opportunity",
+        "source_system": "SAM.gov",
+        "source_record_id": opportunity.get("notice_id"),
+        "source_title": opportunity.get("title"),
+        "source_url": opportunity.get("ui_link") or opportunity.get("description_url"),
+        "source_record_date": opportunity.get("posted_at"),
+        "source_amount": opportunity.get("estimated_value_max") or opportunity.get("estimated_value_min"),
+        "agency_name": opportunity.get("funding_agency_name"),
+        "agency_code": opportunity.get("funding_agency_code"),
+        "naics_code": opportunity.get("naics_code"),
+        "psc_code": opportunity.get("psc_code"),
+        "explanation": "Live SAM.gov source record for the selected opportunity. Competitor graph analysis is pending SOW embedding enrichment.",
+        "confidence": 0.72,
+        "source_payload": opportunity.get("source_payload") or {},
+    }
+    return {
+        "items": [item],
+        "coverage": {"opportunity": 1},
+        "score_factors": _score_factor_evidence({"competitive_baseline": baseline}),
     }
 
 

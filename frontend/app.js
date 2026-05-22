@@ -1,4 +1,5 @@
 const apiBaseUrl = window.CAPTUREOS_API_BASE_URL || "";
+const opportunityPageSize = 25;
 
 const fallbackOpportunities = [
   {
@@ -95,6 +96,8 @@ const fallbackAnalysis = {
 
 let currentOpportunityId = null;
 let currentAnalysis = null;
+let loadedOpportunities = [];
+let totalOpportunities = 0;
 
 const els = {
   apiStatus: document.querySelector("#api-status"),
@@ -105,6 +108,8 @@ const els = {
   exportBrief: document.querySelector("#export-brief"),
   opportunities: document.querySelector("#opportunities"),
   opportunityCount: document.querySelector("#opportunity-count"),
+  opportunityRange: document.querySelector("#opportunity-range"),
+  loadMore: document.querySelector("#load-more"),
   analysisTitle: document.querySelector("#analysis-title"),
   analysisSubhead: document.querySelector("#analysis-subhead"),
   pwin: document.querySelector("#pwin"),
@@ -130,15 +135,49 @@ const els = {
   notes: document.querySelector("#notes"),
 };
 
-els.refresh.addEventListener("click", loadOpportunities);
+els.refresh.addEventListener("click", () => loadOpportunities({ append: false }));
+els.loadMore.addEventListener("click", () => loadOpportunities({ append: true }));
 els.trackGo.addEventListener("click", () => updateWorkflow("go"));
 els.trackNoGo.addEventListener("click", () => updateWorkflow("no_go"));
 els.exportBrief.addEventListener("click", exportBrief);
 
-loadOpportunities();
+loadOpportunities({ append: false });
 
-async function loadOpportunities() {
-  const params = new URLSearchParams({ limit: "25" });
+async function loadOpportunities({ append = false } = {}) {
+  const offset = append ? loadedOpportunities.length : 0;
+  const params = buildOpportunityParams(offset);
+
+  els.loadMore.disabled = true;
+
+  let data;
+  try {
+    data = await fetchJson(`${apiBaseUrl}/api/v1/opportunities/active?${params.toString()}`);
+    setApiStatus("Live API");
+  } catch (error) {
+    if (append) {
+      setApiStatus("Local demo data");
+      renderOpportunities(loadedOpportunities, totalOpportunities);
+      return;
+    }
+    data = { items: fallbackOpportunities, pagination: { total: fallbackOpportunities.length } };
+    setApiStatus("Local demo data");
+  }
+
+  const incoming = data.items || [];
+  loadedOpportunities = append ? [...loadedOpportunities, ...incoming] : incoming;
+  totalOpportunities = Number(data.pagination?.total ?? loadedOpportunities.length);
+  renderOpportunities(loadedOpportunities, totalOpportunities);
+  const first = append ? null : loadedOpportunities[0];
+  if (first) {
+    await loadAnalysis(first.opportunity_id || first.notice_id);
+  }
+}
+
+function buildOpportunityParams(offset) {
+  const params = new URLSearchParams({
+    limit: String(opportunityPageSize),
+    offset: String(offset),
+  });
 
   const search = valueOf("#search");
   const minValue = valueOf("#min-value");
@@ -148,21 +187,7 @@ async function loadOpportunities() {
   if (maxValue) params.set("max_value", maxValue);
   splitCodes(valueOf("#naics")).forEach((code) => params.append("naics_codes", code));
   splitCodes(valueOf("#psc")).forEach((code) => params.append("psc_codes", code));
-
-  let data;
-  try {
-    data = await fetchJson(`${apiBaseUrl}/api/v1/opportunities/active?${params.toString()}`);
-    setApiStatus("Live API");
-  } catch (error) {
-    data = { items: fallbackOpportunities };
-    setApiStatus("Local demo data");
-  }
-
-  renderOpportunities(data.items || []);
-  const first = (data.items || [])[0];
-  if (first) {
-    await loadAnalysis(first.opportunity_id || first.notice_id);
-  }
+  return params;
 }
 
 async function loadAnalysis(opportunityId) {
@@ -226,8 +251,11 @@ async function exportBrief() {
   }
 }
 
-function renderOpportunities(items) {
-  els.opportunityCount.textContent = String(items.length);
+function renderOpportunities(items, total = items.length) {
+  els.opportunityCount.textContent = numberFormat(total);
+  els.opportunityRange.textContent = `Showing ${numberFormat(items.length)} of ${numberFormat(total)}`;
+  els.loadMore.hidden = items.length >= total || total === 0;
+  els.loadMore.disabled = items.length >= total || total === 0;
   els.opportunities.innerHTML = items.length
     ? items.map((item) => opportunityButton(item)).join("")
     : `<div class="empty">No active opportunities matched these filters.</div>`;
@@ -539,6 +567,10 @@ function valueOf(selector) {
 function currencyRange(min, max) {
   if (min && max) return `${money(min)} - ${money(max)}`;
   return money(max || min);
+}
+
+function numberFormat(value) {
+  return new Intl.NumberFormat("en-US").format(Number(value || 0));
 }
 
 function money(value) {

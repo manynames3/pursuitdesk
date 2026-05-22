@@ -191,6 +191,28 @@ button.secondary:hover {
   display: grid;
 }
 
+.opportunity-list-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.opportunity-list-footer button {
+  min-height: 34px;
+  padding: 0 12px;
+}
+
+.opportunity-list-footer button[hidden] {
+  display: none;
+}
+
 .opp {
   display: grid;
   gap: 8px;

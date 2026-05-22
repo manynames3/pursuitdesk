@@ -17,3 +17,4 @@ crash.*.log
 dist/
 build/
 node_modules/
+.wrangler/

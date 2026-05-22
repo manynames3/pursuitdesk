@@ -18,7 +18,7 @@ locals {
     for name, fn in var.lambda_functions : name => {
       function_name        = "${local.name_prefix}-${name}"
       package_path         = fn.package_path
-      source_code_hash     = fn.source_code_hash
+      source_code_hash     = fn.source_code_hash != null ? fn.source_code_hash : try(filebase64sha256(fn.package_path), null)
       handler              = fn.handler
       runtime              = fn.runtime
       memory_size          = fn.memory_size
@@ -105,10 +105,11 @@ resource "aws_lambda_function" "backend" {
   source_code_hash = each.value.source_code_hash
   layers           = var.lambda_layer_arns
 
-  # 128/256 MB plus reserved concurrency caps keep Lambda spend bounded under
-  # per-millisecond billing. No provisioned concurrency is declared.
-  memory_size                    = each.value.memory_size
-  timeout                        = each.value.timeout
+  # 128/256 MB keeps compute cost low under per-millisecond billing. No
+  # provisioned concurrency is declared, and request volume is capped at HTTP API.
+  memory_size = each.value.memory_size
+  timeout     = each.value.timeout
+
   reserved_concurrent_executions = each.value.reserved_concurrency
 
   # Lambda and RDS share the same no-NAT public subnets. PostgreSQL traffic stays

@@ -75,44 +75,52 @@ variable "lambda_functions" {
     runtime              = optional(string, "python3.12")
     memory_size          = optional(number, 256)
     timeout              = optional(number, 20)
-    reserved_concurrency = optional(number, 2)
+    reserved_concurrency = optional(number)
     environment          = optional(map(string), {})
   }))
 
   default = {
     api = {
-      package_path         = "../../dist/captureos_api.zip"
-      handler              = "src.lambda_api.handler"
-      runtime              = "python3.12"
-      memory_size          = 256
-      timeout              = 20
-      reserved_concurrency = 2
+      package_path = "../../dist/captureos_api.zip"
+      handler      = "src.lambda_api.handler"
+      runtime      = "python3.12"
+      memory_size  = 256
+      timeout      = 20
       environment = {
         APP_MODULE = "src.api_v1_endpoints:app"
       }
     }
 
     ingest = {
-      package_path         = "../../dist/captureos_ingest.zip"
-      handler              = "src.gsa_api_ingest.lambda_handler"
-      runtime              = "python3.12"
-      memory_size          = 128
-      timeout              = 60
-      reserved_concurrency = 1
+      package_path = "../../dist/captureos_ingest.zip"
+      handler      = "src.gsa_api_ingest.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 128
+      timeout      = 60
       environment = {
         LOG_LEVEL = "INFO"
       }
     }
 
     resolver = {
-      package_path         = "../../dist/captureos_resolver.zip"
-      handler              = "src.entity_resolver_lambda.lambda_handler"
-      runtime              = "python3.12"
-      memory_size          = 256
-      timeout              = 30
-      reserved_concurrency = 1
+      package_path = "../../dist/captureos_resolver.zip"
+      handler      = "src.entity_resolver_lambda.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 256
+      timeout      = 30
       environment = {
         ENTITY_RESOLUTION_AUTO_MATCH_SCORE = "0.91"
+      }
+    }
+
+    db_admin = {
+      package_path = "../../dist/captureos_db_admin.zip"
+      handler      = "src.db_admin_lambda.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 256
+      timeout      = 120
+      environment = {
+        LOG_LEVEL = "INFO"
       }
     }
   }
@@ -128,8 +136,8 @@ variable "lambda_functions" {
   }
 
   validation {
-    condition     = alltrue([for fn in values(var.lambda_functions) : fn.reserved_concurrency >= 1 && fn.reserved_concurrency <= 5])
-    error_message = "Each Lambda reserved_concurrency must be between 1 and 5 to cap runaway demo spend."
+    condition     = alltrue([for fn in values(var.lambda_functions) : fn.reserved_concurrency == null || (fn.reserved_concurrency >= 10 && fn.reserved_concurrency <= 25)])
+    error_message = "When set, reserved_concurrency must be 10-25 so AWS keeps its required unreserved concurrency pool."
   }
 }
 

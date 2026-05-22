@@ -11,6 +11,11 @@ GovCon CaptureOS is an AI-assisted federal market intelligence demo stack for op
 
 ## Cloudflare Pages
 
+Live demo:
+
+- Frontend: https://govcon-captureos.pages.dev/
+- Backend API: https://n2qx0wcyg8.execute-api.us-east-1.amazonaws.com
+
 Use these Git integration settings for the frontend:
 
 - Production branch: `main`
@@ -18,4 +23,26 @@ Use these Git integration settings for the frontend:
 - Build command: leave blank
 - Build output directory: `.`
 
-The dashboard can run before the AWS API is live because it falls back to local demo data. When the API Gateway endpoint is ready, set `window.CAPTUREOS_API_BASE_URL` in the Pages project or add a small runtime config script before `app.js`.
+The dashboard reads its backend base URL from `frontend/config.js`. It falls back to local demo data if the API is unavailable.
+
+GitHub Actions will deploy `frontend/` to Cloudflare Pages when `CLOUDFLARE_API_TOKEN` is set as a repository secret. `CLOUDFLARE_ACCOUNT_ID` is already safe to keep as a repository variable.
+
+## Lambda Packaging
+
+Build deployable AWS Lambda artifacts before running Terraform:
+
+```bash
+./scripts/build_lambda_packages.sh
+```
+
+The script creates ARM64 Python 3.12-compatible zip files under `dist/` for the API, ingestion, entity resolver, and one-shot database admin Lambda.
+
+Initialize or refresh the demo database after Terraform has deployed the Lambda functions:
+
+```bash
+aws lambda invoke \
+  --function-name govcon-captureos-demo-db_admin \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"action":"migrate_and_seed","reset":true}' \
+  /tmp/captureos-db-admin-response.json
+```

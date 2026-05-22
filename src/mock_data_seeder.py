@@ -352,8 +352,12 @@ def build_sub_awards(awards: Sequence[Mapping[str, Any]], entities: Sequence[Map
     sub_awards: List[Dict[str, Any]] = []
     for award in awards:
         domain = award["source_payload"]["domain"]
-        subs = sub_patterns[domain]
-        for tier_index, sub_name in enumerate(subs[:3], start=1):
+        subs = [
+            sub_name
+            for sub_name in sub_patterns[domain]
+            if entity_ids[sub_name] != award["prime_entity_id"]
+        ][:3]
+        for tier_index, sub_name in enumerate(subs, start=1):
             sub_awards.append(
                 {
                     "sub_award_id": stable_uuid(f"subaward:{award['piid']}:{sub_name}"),

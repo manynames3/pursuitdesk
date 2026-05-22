@@ -28,7 +28,6 @@ ANALYSIS_QUERY_TIMEOUT_MS = int(os.getenv("ANALYSIS_QUERY_TIMEOUT_MS", "2500"))
 
 router = APIRouter(prefix="/api/v1", tags=["GovCon CaptureOS v1"])
 app = FastAPI(title="GovCon CaptureOS Presentation API", version="1.0.0")
-app.include_router(router)
 
 _pool_lock = threading.Lock()
 _pool: Optional[ThreadedConnectionPool] = None
@@ -359,3 +358,6 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, list):
         return [_json_safe(item) for item in value]
     return value
+
+
+app.include_router(router)

@@ -24,6 +24,7 @@ DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 DEFAULT_BASE_BACKOFF_SECONDS = float(os.getenv("BASE_BACKOFF_SECONDS", "1.0"))
 DEFAULT_MAX_BACKOFF_SECONDS = float(os.getenv("MAX_BACKOFF_SECONDS", "60.0"))
 DEFAULT_PAGE_LIMIT = min(max(int(os.getenv("PAGE_LIMIT", "1000")), 1), 1000)
+PREFER_IPV6_EGRESS = os.getenv("PREFER_IPV6_EGRESS", "true").strip().lower() in {"1", "true", "yes", "on"}
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 DIRECT_FILTER_KEYS = {
     "ptype",
@@ -41,6 +42,22 @@ DIRECT_FILTER_KEYS = {
     "ccode",
 }
 DATE_FILTER_KEYS = {"rdlfrom", "rdlto"}
+_ORIGINAL_GETADDRINFO = socket.getaddrinfo
+
+
+def _install_ipv6_preference() -> None:
+    if not PREFER_IPV6_EGRESS or getattr(socket.getaddrinfo, "_captureos_ipv6_preferred", False):
+        return
+
+    def prefer_ipv6_getaddrinfo(*args: Any, **kwargs: Any) -> List[Any]:
+        results = list(_ORIGINAL_GETADDRINFO(*args, **kwargs))
+        return sorted(results, key=lambda item: 0 if item[0] == socket.AF_INET6 else 1)
+
+    prefer_ipv6_getaddrinfo._captureos_ipv6_preferred = True  # type: ignore[attr-defined]
+    socket.getaddrinfo = prefer_ipv6_getaddrinfo
+
+
+_install_ipv6_preference()
 
 
 class IngestError(Exception):
@@ -60,6 +77,9 @@ class RetryBudgetExceeded(IngestError):
 
 
 def lambda_handler(event: Mapping[str, Any], context: Any) -> Dict[str, Any]:
+    if event.get("mode") == "upsert_sam_records":
+        return upsert_sam_records_event(event)
+
     if "Records" not in event:
         return ingest_direct_event(event, context=context)
 
@@ -79,12 +99,32 @@ def lambda_handler(event: Mapping[str, Any], context: Any) -> Dict[str, Any]:
     return {"batchItemFailures": failures, "processedRecords": processed}
 
 
+def upsert_sam_records_event(event: Mapping[str, Any]) -> Dict[str, Any]:
+    records = event.get("records") or []
+    if not isinstance(records, list):
+        raise IngestError("records must be a list of raw SAM.gov opportunity records.")
+
+    ingest_window = event.get("ingest_window") if isinstance(event.get("ingest_window"), Mapping) else {}
+    source_received_at = datetime.now(timezone.utc).isoformat()
+    payloads = [normalize_opportunity(item, ingest_window, source_received_at) for item in records]
+    written_count = upsert_opportunities_to_database(payloads)
+    update_data_freshness(
+        source_system="SAM.gov",
+        dataset_name="Opportunities",
+        source_mode=str(event.get("source_mode") or "live_api"),
+        record_count=int(event.get("total_records") or written_count),
+        source_url=DEFAULT_ENDPOINT,
+    )
+    return {"normalizedRecords": len(payloads), "writtenRecords": written_count}
+
+
 def ingest_direct_event(event: Mapping[str, Any], context: Any = None) -> Dict[str, Any]:
     body = _scheduled_body(event)
     output_queue_url = body.get("output_queue_url") or os.getenv("UPSERT_QUEUE_URL")
+    upsert_lambda_name = body.get("upsert_lambda_name") or os.getenv("UPSERT_LAMBDA_NAME")
     direct_db_upsert = _truthy(body.get("direct_db_upsert", os.getenv("DIRECT_DB_UPSERT", "true")))
-    if not output_queue_url and not direct_db_upsert and not body.get("dry_run"):
-        raise IngestError("Set DIRECT_DB_UPSERT=true, UPSERT_QUEUE_URL, or dry_run=true for direct ingestion.")
+    if not output_queue_url and not upsert_lambda_name and not direct_db_upsert and not body.get("dry_run"):
+        raise IngestError("Set DIRECT_DB_UPSERT=true, UPSERT_LAMBDA_NAME, UPSERT_QUEUE_URL, or dry_run=true for direct ingestion.")
 
     record = {
         "messageId": str(event.get("id") or f"direct-{int(time.time())}"),
@@ -94,11 +134,14 @@ def ingest_direct_event(event: Mapping[str, Any], context: Any = None) -> Dict[s
 
     run_id = None
     if direct_db_upsert:
+        LOGGER.info("Starting SAM.gov direct DB ingest run.")
         run_id = _start_ingest_run(body)
 
     try:
         if direct_db_upsert:
             summary = ingest_direct_to_database(record, context=context)
+        elif upsert_lambda_name:
+            summary = ingest_direct_to_upsert_lambda(record, str(upsert_lambda_name), context=context)
         else:
             summary = ingest_sqs_record(record, context=context)
         if run_id:
@@ -150,6 +193,48 @@ def ingest_direct_to_database(record: Mapping[str, Any], context: Any = None) ->
         "postedFrom": config["params"]["postedFrom"],
         "postedTo": config["params"]["postedTo"],
         "directDbUpsert": not dry_run,
+    }
+    if dry_run:
+        summary["records"] = dry_run_records
+    return summary
+
+
+def ingest_direct_to_upsert_lambda(record: Mapping[str, Any], upsert_lambda_name: str, context: Any = None) -> Dict[str, Any]:
+    body = _json_object(record.get("body"))
+    config = _build_request_config(body)
+    dry_run = bool(body.get("dry_run", False))
+    upsert_chunk_size = min(max(int(body.get("upsert_chunk_size", 100)), 1), 250)
+
+    normalized_count = 0
+    written_count = 0
+    dry_run_records: List[Dict[str, Any]] = []
+    for page_response, records in iter_opportunity_pages(config, str(record.get("messageId", "direct")), context):
+        normalized_count += len(records)
+        if dry_run:
+            remaining = max(0, int(body.get("dry_run_max_records", 25)) - len(dry_run_records))
+            dry_run_records.extend(records[:remaining])
+        else:
+            for chunk in _chunk_by_count(records, upsert_chunk_size):
+                written_count += invoke_upsert_lambda(
+                    upsert_lambda_name,
+                    chunk,
+                    total_records=int(page_response.get("totalRecords") or len(records)),
+                    ingest_window=config["ingest_window"],
+                )
+        LOGGER.info(
+            "Fetched SAM.gov bridge page offset=%s limit=%s totalRecords=%s pageRecords=%s",
+            page_response.get("offset"),
+            page_response.get("limit"),
+            page_response.get("totalRecords"),
+            len(records),
+        )
+
+    summary: Dict[str, Any] = {
+        "normalizedRecords": normalized_count,
+        "writtenRecords": written_count,
+        "postedFrom": config["params"]["postedFrom"],
+        "postedTo": config["params"]["postedTo"],
+        "upsertLambda": upsert_lambda_name,
     }
     if dry_run:
         summary["records"] = dry_run_records
@@ -391,6 +476,7 @@ def emit_upsert_payloads(records: List[Dict[str, Any]], queue_url: str, group_id
 
 
 def _build_request_config(body: Mapping[str, Any]) -> Dict[str, Any]:
+    LOGGER.info("Building SAM.gov request configuration.")
     api_key = body.get("api_key") or _resolve_sam_api_key()
     if not api_key:
         raise IngestError("SAM_API_KEY must be configured or provided in the SQS message body.")
@@ -539,6 +625,32 @@ def upsert_opportunities_to_database(records: List[Dict[str, Any]]) -> int:
     return len(records)
 
 
+def invoke_upsert_lambda(
+    function_name: str,
+    records: List[Dict[str, Any]],
+    total_records: int,
+    ingest_window: Mapping[str, Any],
+) -> int:
+    if not records:
+        return 0
+    payload = {
+        "mode": "upsert_sam_records",
+        "source_mode": "live_api",
+        "total_records": total_records,
+        "ingest_window": dict(ingest_window),
+        "records": records,
+    }
+    response = _lambda_client().invoke(
+        FunctionName=function_name,
+        InvocationType="RequestResponse",
+        Payload=json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8"),
+    )
+    response_payload = json.loads(response["Payload"].read().decode("utf-8") or "{}")
+    if response.get("FunctionError"):
+        raise IngestError(f"Upsert Lambda failed: {json.dumps(response_payload, default=str)[:1000]}")
+    return int(response_payload.get("writtenRecords") or 0)
+
+
 def update_data_freshness(
     source_system: str,
     dataset_name: str,
@@ -625,6 +737,7 @@ def _finish_ingest_run(
 
 def _http_get_json(endpoint: str, params: Mapping[str, Any]) -> Dict[str, Any]:
     query = urllib.parse.urlencode(params, doseq=True)
+    LOGGER.info("Requesting SAM.gov opportunities page offset=%s limit=%s", params.get("offset"), params.get("limit"))
     request = urllib.request.Request(
         f"{endpoint}?{query}",
         headers={
@@ -772,8 +885,13 @@ def _resolve_sam_api_key() -> Optional[str]:
     if not secret_arn:
         return None
     import boto3
+    from botocore.config import Config
 
-    secret = boto3.client("secretsmanager").get_secret_value(SecretId=secret_arn)
+    LOGGER.info("Reading SAM.gov API key from Secrets Manager.")
+    secret = boto3.client(
+        "secretsmanager",
+        config=Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 2}),
+    ).get_secret_value(SecretId=secret_arn)
     value = secret.get("SecretString")
     if not value:
         return None
@@ -842,6 +960,18 @@ def _sqs_client() -> Any:
     import boto3
 
     return boto3.client("sqs")
+
+
+def _lambda_client() -> Any:
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client("lambda", config=Config(connect_timeout=3, read_timeout=30, retries={"max_attempts": 2}))
+
+
+def _chunk_by_count(records: List[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, Any]]]:
+    for index in range(0, len(records), size):
+        yield records[index : index + size]
 
 
 def _redacted(params: Mapping[str, Any]) -> Dict[str, Any]:

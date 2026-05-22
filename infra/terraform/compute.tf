@@ -35,10 +35,15 @@ locals {
       memory_size          = fn.memory_size
       timeout              = fn.timeout
       reserved_concurrency = fn.reserved_concurrency
+      vpc_enabled          = fn.vpc_enabled
       environment          = merge(local.lambda_base_environment, fn.environment)
     }
   }
 }
+
+data "aws_caller_identity" "current" {}
+
+data "aws_region" "current" {}
 
 resource "aws_cloudwatch_log_group" "lambda" {
   for_each = local.lambda_runtime_config
@@ -97,6 +102,14 @@ resource "aws_iam_role_policy" "lambda_runtime" {
           "bedrock:InvokeModelWithResponseStream"
         ]
         Resource = "*"
+      },
+      {
+        Sid    = "InvokeCaptureOsUpsertLambda"
+        Effect = "Allow"
+        Action = [
+          "lambda:InvokeFunction"
+        ]
+        Resource = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-upsert"
       }
       ],
       length(compact([var.sam_api_key_secret_arn, var.stripe_api_key_secret_arn, var.stripe_webhook_secret_arn])) > 0 ? [
@@ -137,12 +150,15 @@ resource "aws_lambda_function" "backend" {
 
   reserved_concurrent_executions = each.value.reserved_concurrency
 
-  # Lambda and RDS share the same no-NAT public subnets. PostgreSQL traffic stays
-  # private through security groups; outbound HTTPS uses dual-stack IPv6 where available.
-  vpc_config {
-    subnet_ids                  = [for subnet in aws_subnet.public : subnet.id]
-    security_group_ids          = [aws_security_group.lambda.id]
-    ipv6_allowed_for_dual_stack = true
+  # VPC-enabled functions can reach private RDS. The SAM fetcher stays outside
+  # the VPC so it has managed Lambda internet egress without a NAT Gateway.
+  dynamic "vpc_config" {
+    for_each = each.value.vpc_enabled ? [1] : []
+    content {
+      subnet_ids                  = [for subnet in aws_subnet.public : subnet.id]
+      security_group_ids          = [aws_security_group.lambda.id]
+      ipv6_allowed_for_dual_stack = true
+    }
   }
 
   environment {

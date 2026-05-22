@@ -70,7 +70,7 @@ Set these Terraform variables when moving from demo mode to paid users:
 - `stripe_api_key_secret_arn`, `stripe_webhook_secret_arn`, and `stripe_price_id`
 - `enable_cloudwatch_alarms = true` if the small CloudWatch alarm cost is acceptable
 
-The SAM.gov scheduler uses EventBridge Scheduler and invokes the ingest Lambda directly. It upserts opportunities into PostgreSQL and updates `capture.data_freshness` and `capture.ingest_runs`. It is disabled by default so the demo does not fail without a SAM.gov API key.
+The SAM.gov scheduler uses EventBridge Scheduler and invokes the public `ingest` Lambda, which runs outside the VPC for managed internet egress. That Lambda fetches SAM.gov and invokes the VPC-attached `upsert` Lambda, which writes to PostgreSQL. This keeps RDS private without adding a NAT Gateway.
 
 Auth is enforced in the API Lambda through JWKS validation and can also be enforced at API Gateway. Billing checkout uses Stripe Checkout when secrets are configured; Stripe webhooks verify `Stripe-Signature` when a webhook signing secret is present. Customer onboarding imports past performance into `capture.customer_past_performance` and refreshes the scoring profile rollup.
 
@@ -83,7 +83,17 @@ export SAM_API_KEY="..."
 ./scripts/enable_live_sam_ingest.sh
 ```
 
-The script creates or updates an AWS Secrets Manager secret, writes the secret ARN to the ignored `infra/terraform/live_ingest.auto.tfvars` file, enables the EventBridge Scheduler job, and runs a one-time 30-day active-opportunity backfill. Override these optional knobs when needed:
+The script creates or updates an AWS Secrets Manager secret, writes the secret ARN to the ignored `infra/terraform/live_ingest.auto.tfvars` file, enables the EventBridge Scheduler job, and runs a one-time 30-day active-opportunity backfill. The scheduled path uses a no-NAT split: public fetch Lambda -> private VPC upsert Lambda.
+
+You can run a manual bridge backfill through the same private upsert path:
+
+```bash
+export SAM_API_KEY="..."
+./scripts/backfill_sam_opportunities.py --days 30 --max-pages 5
+unset SAM_API_KEY
+```
+
+Override these optional knobs when needed:
 
 ```bash
 GSA_INGEST_SCHEDULE_EXPRESSION="rate(12 hours)" \

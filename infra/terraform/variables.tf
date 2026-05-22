@@ -76,6 +76,7 @@ variable "lambda_functions" {
     memory_size          = optional(number, 256)
     timeout              = optional(number, 20)
     reserved_concurrency = optional(number)
+    vpc_enabled          = optional(bool, true)
     environment          = optional(map(string), {})
   }))
 
@@ -92,6 +93,18 @@ variable "lambda_functions" {
     }
 
     ingest = {
+      package_path = "../../dist/captureos_ingest.zip"
+      handler      = "src.gsa_api_ingest.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 128
+      timeout      = 60
+      vpc_enabled  = false
+      environment = {
+        LOG_LEVEL = "INFO"
+      }
+    }
+
+    upsert = {
       package_path = "../../dist/captureos_ingest.zip"
       handler      = "src.gsa_api_ingest.lambda_handler"
       runtime      = "python3.12"

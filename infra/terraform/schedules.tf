@@ -59,13 +59,15 @@ resource "aws_scheduler_schedule" "sam_opportunities_ingest" {
     arn      = aws_lambda_function.backend["ingest"].arn
     role_arn = aws_iam_role.scheduler_invoke_lambda[0].arn
     input = jsonencode({
-      source           = "aws.scheduler"
-      dataset          = "sam_opportunities"
-      lookback_days    = var.gsa_ingest_lookback_days
-      max_pages        = var.gsa_ingest_max_pages
-      ptype            = ["o", "k", "p", "r"]
-      status           = "active"
-      direct_db_upsert = true
+      source             = "aws.scheduler"
+      dataset            = "sam_opportunities"
+      lookback_days      = var.gsa_ingest_lookback_days
+      max_pages          = var.gsa_ingest_max_pages
+      ptype              = ["o", "k", "p", "r"]
+      status             = "active"
+      direct_db_upsert   = false
+      upsert_lambda_name = aws_lambda_function.backend["upsert"].function_name
+      upsert_chunk_size  = 100
     })
 
     retry_policy {

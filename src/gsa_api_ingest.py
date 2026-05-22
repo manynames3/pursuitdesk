@@ -1,0 +1,537 @@
+from __future__ import annotations
+
+import email.utils
+import hashlib
+import json
+import logging
+import os
+import random
+import socket
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+
+LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+
+DEFAULT_ENDPOINT = "https://api.sam.gov/opportunities/v2/search"
+DEFAULT_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
+DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+DEFAULT_BASE_BACKOFF_SECONDS = float(os.getenv("BASE_BACKOFF_SECONDS", "1.0"))
+DEFAULT_MAX_BACKOFF_SECONDS = float(os.getenv("MAX_BACKOFF_SECONDS", "60.0"))
+DEFAULT_PAGE_LIMIT = min(max(int(os.getenv("PAGE_LIMIT", "1000")), 1), 1000)
+TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
+DIRECT_FILTER_KEYS = {
+    "ptype",
+    "solnum",
+    "noticeid",
+    "title",
+    "state",
+    "zip",
+    "status",
+    "organizationCode",
+    "organizationName",
+    "typeOfSetAside",
+    "typeOfSetAsideDescription",
+    "ncode",
+    "ccode",
+}
+DATE_FILTER_KEYS = {"rdlfrom", "rdlto"}
+
+
+class IngestError(Exception):
+    """Base class for ingestion failures that should be visible to SQS retry/DLQ handling."""
+
+
+class HttpStatusError(IngestError):
+    def __init__(self, status_code: int, headers: Mapping[str, str], body: str) -> None:
+        super().__init__(f"SAM.gov request failed with HTTP {status_code}: {body[:500]}")
+        self.status_code = status_code
+        self.headers = headers
+        self.body = body
+
+
+class RetryBudgetExceeded(IngestError):
+    """Raised when Lambda cannot complete a throttled request within its retry budget."""
+
+
+def lambda_handler(event: Mapping[str, Any], context: Any) -> Dict[str, Any]:
+    failures: List[Dict[str, str]] = []
+    processed = 0
+
+    for record in event.get("Records", []):
+        message_id = str(record.get("messageId", "unknown-message"))
+        try:
+            summary = ingest_sqs_record(record, context=context)
+            processed += 1
+            LOGGER.info("Processed SAM.gov ingest message %s: %s", message_id, summary)
+        except Exception:
+            LOGGER.exception("Failed SAM.gov ingest message %s", message_id)
+            failures.append({"itemIdentifier": message_id})
+
+    return {"batchItemFailures": failures, "processedRecords": processed}
+
+
+def ingest_sqs_record(record: Mapping[str, Any], context: Any = None) -> Dict[str, Any]:
+    body = _json_object(record.get("body"))
+    config = _build_request_config(body)
+    output_queue_url = body.get("output_queue_url") or os.getenv("UPSERT_QUEUE_URL")
+    dry_run = bool(body.get("dry_run", False))
+
+    if not output_queue_url and not dry_run:
+        raise IngestError("UPSERT_QUEUE_URL must be configured unless the event sets dry_run=true.")
+
+    message_id = str(record.get("messageId", "manual"))
+    group_id = _message_group_id(record)
+    normalized_count = 0
+    emitted_batches = 0
+    dry_run_records: List[Dict[str, Any]] = []
+
+    for page_response, records in iter_opportunity_pages(config, message_id, context):
+        source_received_at = datetime.now(timezone.utc).isoformat()
+        payloads = [
+            normalize_opportunity(item, config["ingest_window"], source_received_at)
+            for item in records
+        ]
+        normalized_count += len(payloads)
+
+        if dry_run:
+            remaining = max(0, int(body.get("dry_run_max_records", 25)) - len(dry_run_records))
+            dry_run_records.extend(payloads[:remaining])
+        else:
+            emitted_batches += emit_upsert_payloads(payloads, output_queue_url, group_id)
+
+        LOGGER.info(
+            "Fetched SAM.gov page offset=%s limit=%s totalRecords=%s pageRecords=%s",
+            page_response.get("offset"),
+            page_response.get("limit"),
+            page_response.get("totalRecords"),
+            len(records),
+        )
+
+    summary: Dict[str, Any] = {
+        "normalizedRecords": normalized_count,
+        "emittedBatches": emitted_batches,
+        "postedFrom": config["params"]["postedFrom"],
+        "postedTo": config["params"]["postedTo"],
+    }
+    if dry_run:
+        summary["records"] = dry_run_records
+    return summary
+
+
+def iter_opportunity_pages(
+    config: Mapping[str, Any],
+    retry_seed: str,
+    context: Any = None,
+) -> Iterable[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
+    params = dict(config["params"])
+    endpoint = str(config["endpoint"])
+    limit = int(params["limit"])
+    page_offset = int(config["start_offset"])
+    max_pages = config.get("max_pages")
+    pages_read = 0
+
+    while True:
+        params["offset"] = page_offset
+        page_response = request_json_with_retry(
+            endpoint,
+            params,
+            retry_seed=f"{retry_seed}:{page_offset}",
+            context=context,
+        )
+        records = page_response.get("opportunitiesData") or []
+        if not isinstance(records, list):
+            raise IngestError("SAM.gov response field opportunitiesData was not a list.")
+
+        yield page_response, records
+
+        total_records = int(page_response.get("totalRecords") or 0)
+        pages_read += 1
+        next_page_starts_after = (page_offset + 1) * limit
+
+        if not records or next_page_starts_after >= total_records:
+            break
+        if max_pages is not None and pages_read >= int(max_pages):
+            break
+        page_offset += 1
+
+
+def request_json_with_retry(
+    endpoint: str,
+    params: Mapping[str, Any],
+    retry_seed: str,
+    context: Any = None,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> Dict[str, Any]:
+    last_error: Optional[BaseException] = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return _http_get_json(endpoint, params)
+        except HttpStatusError as exc:
+            if exc.status_code == 404:
+                LOGGER.info("SAM.gov returned 404/no-data for params=%s", _redacted(params))
+                return {
+                    "totalRecords": 0,
+                    "limit": params.get("limit"),
+                    "offset": params.get("offset"),
+                    "opportunitiesData": [],
+                }
+            if exc.status_code not in TRANSIENT_HTTP_STATUSES:
+                raise
+            last_error = exc
+            retry_after = _parse_retry_after(exc.headers.get("Retry-After"))
+        except (socket.timeout, TimeoutError, urllib.error.URLError) as exc:
+            last_error = exc
+            retry_after = None
+
+        if attempt >= max_retries:
+            raise RetryBudgetExceeded(f"Retry budget exhausted after {max_retries} retries.") from last_error
+
+        sleep_seconds = _backoff_seconds(
+            attempt=attempt,
+            retry_seed=retry_seed,
+            retry_after_seconds=retry_after,
+        )
+        _sleep_with_lambda_deadline(sleep_seconds, context)
+
+    raise RetryBudgetExceeded("Retry loop exited without returning a response.") from last_error
+
+
+def normalize_opportunity(
+    source: Mapping[str, Any],
+    ingest_window: Mapping[str, Any],
+    source_received_at: str,
+) -> Dict[str, Any]:
+    notice_id = _clean_str(source.get("noticeId"))
+    if not notice_id:
+        fingerprint = hashlib.sha256(json.dumps(source, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        notice_id = f"missing-notice-id-{fingerprint[:24]}"
+
+    full_parent_name = _clean_str(source.get("fullParentPathName"))
+    full_parent_code = _clean_str(source.get("fullParentPathCode"))
+    name_parts = _split_path(full_parent_name)
+    code_parts = _split_path(full_parent_code)
+
+    award = source.get("award") if isinstance(source.get("award"), Mapping) else {}
+    awardee = award.get("awardee") if isinstance(award.get("awardee"), Mapping) else {}
+
+    opportunity = {
+        "notice_id": notice_id,
+        "solicitation_number": _clean_str(source.get("solicitationNumber")),
+        "title": _clean_str(source.get("title")) or "Untitled SAM.gov notice",
+        "opportunity_type": _clean_str(source.get("type")),
+        "base_type": _clean_str(source.get("baseType")),
+        "active_status": _active_status(source.get("active")),
+        "posted_at": _parse_sam_datetime(source.get("postedDate")),
+        "response_deadline": _parse_sam_datetime(source.get("responseDeadLine")),
+        "archive_at": _parse_sam_datetime(source.get("archiveDate")),
+        "naics_code": _clean_str(source.get("naicsCode")),
+        "psc_code": _clean_str(source.get("classificationCode")),
+        "set_aside_code": _clean_str(source.get("typeOfSetAside")) or _clean_str(source.get("setAsideCode")),
+        "set_aside_description": _clean_str(source.get("typeOfSetAsideDescription")) or _clean_str(source.get("setAside")),
+        "funding_agency_name": name_parts[0] if name_parts else _clean_str(source.get("department")),
+        "funding_agency_code": code_parts[0] if code_parts else None,
+        "subtier_name": name_parts[1] if len(name_parts) > 1 else _clean_str(source.get("subTier")),
+        "office_name": name_parts[2] if len(name_parts) > 2 else _clean_str(source.get("office")),
+        "full_parent_path_name": full_parent_name,
+        "full_parent_path_code": full_parent_code,
+        "organization_type": _clean_str(source.get("organizationType")),
+        "place_of_performance": _json_dict(source.get("placeOfPerformance")),
+        "office_address": _json_dict(source.get("officeAddress")),
+        "estimated_value_min": None,
+        "estimated_value_max": None,
+        "currency_code": "USD",
+        "description_url": _clean_str(source.get("description")),
+        "ui_link": _clean_str(source.get("uiLink")),
+        "resource_links": _string_list(source.get("resourceLinks")),
+        "sow_text": None,
+        "source_payload": dict(source),
+        "source_updated_at": source_received_at,
+    }
+
+    related_award = None
+    if award:
+        related_award = {
+            "award_number": _clean_str(award.get("number")),
+            "award_amount": _money(award.get("amount")),
+            "award_date": _parse_sam_datetime(award.get("date")),
+            "awardee": {
+                "legal_name": _clean_str(awardee.get("name")),
+                "canonical_uei": _clean_str(awardee.get("ueiSAM")),
+                "location": _json_dict(awardee.get("location")),
+            },
+        }
+
+    return {
+        "dataset": "sam_opportunities",
+        "upsert": {
+            "table": "capture.opportunities",
+            "conflict_columns": ["notice_id"],
+            "columns": list(opportunity.keys()),
+        },
+        "natural_key": {"notice_id": notice_id},
+        "ingest_window": dict(ingest_window),
+        "opportunity": opportunity,
+        "related_award": related_award,
+        "source_fingerprint": hashlib.sha256(
+            json.dumps(source, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def emit_upsert_payloads(records: List[Dict[str, Any]], queue_url: str, group_id: str) -> int:
+    if not records:
+        return 0
+
+    sqs = _sqs_client()
+    emitted = 0
+    for chunk in _chunk_records(records):
+        body = json.dumps(
+            {
+                "dataset": "sam_opportunities",
+                "upsert_key": ["notice_id"],
+                "records": chunk,
+            },
+            separators=(",", ":"),
+            default=str,
+        )
+        send_args: Dict[str, Any] = {"QueueUrl": queue_url, "MessageBody": body}
+        if queue_url.endswith(".fifo"):
+            send_args["MessageGroupId"] = _sqs_safe_group_id(group_id)
+            send_args["MessageDeduplicationId"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        sqs.send_message(**send_args)
+        emitted += 1
+    return emitted
+
+
+def _build_request_config(body: Mapping[str, Any]) -> Dict[str, Any]:
+    api_key = body.get("api_key") or os.getenv("SAM_API_KEY")
+    if not api_key:
+        raise IngestError("SAM_API_KEY must be configured or provided in the SQS message body.")
+
+    posted_from = body.get("posted_from") or body.get("postedFrom")
+    posted_to = body.get("posted_to") or body.get("postedTo")
+    if not posted_from or not posted_to:
+        raise IngestError("SQS body must include posted_from/posted_to or postedFrom/postedTo.")
+
+    params: Dict[str, Any] = {
+        "api_key": api_key,
+        "postedFrom": _format_sam_request_date(str(posted_from)),
+        "postedTo": _format_sam_request_date(str(posted_to)),
+        "limit": min(max(int(body.get("limit", DEFAULT_PAGE_LIMIT)), 1), 1000),
+    }
+
+    for key in DIRECT_FILTER_KEYS:
+        if key in body and body[key] not in (None, ""):
+            params[key] = body[key]
+
+    for key in DATE_FILTER_KEYS:
+        if key in body and body[key] not in (None, ""):
+            params[key] = _format_sam_request_date(str(body[key]))
+
+    extra_params = body.get("extra_params") or {}
+    if not isinstance(extra_params, Mapping):
+        raise IngestError("extra_params must be a JSON object when provided.")
+    for key, value in extra_params.items():
+        if value not in (None, ""):
+            params[str(key)] = value
+
+    return {
+        "endpoint": body.get("endpoint") or os.getenv("SAM_OPPORTUNITIES_ENDPOINT", DEFAULT_ENDPOINT),
+        "params": params,
+        "start_offset": int(body.get("offset", 0)),
+        "max_pages": body.get("max_pages"),
+        "ingest_window": {
+            "posted_from": params["postedFrom"],
+            "posted_to": params["postedTo"],
+            "filters": {k: v for k, v in params.items() if k not in {"api_key", "postedFrom", "postedTo", "limit"}},
+        },
+    }
+
+
+def _http_get_json(endpoint: str, params: Mapping[str, Any]) -> Dict[str, Any]:
+    query = urllib.parse.urlencode(params, doseq=True)
+    request = urllib.request.Request(
+        f"{endpoint}?{query}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "GovConCaptureOS/1.0",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
+            payload = response.read().decode("utf-8")
+            return json.loads(payload)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        raise HttpStatusError(exc.code, dict(exc.headers.items()), body) from exc
+    except json.JSONDecodeError as exc:
+        raise IngestError("SAM.gov returned a non-JSON response.") from exc
+
+
+def _backoff_seconds(attempt: int, retry_seed: str, retry_after_seconds: Optional[float]) -> float:
+    exponential = min(DEFAULT_MAX_BACKOFF_SECONDS, DEFAULT_BASE_BACKOFF_SECONDS * (2 ** attempt))
+    rng = random.Random(f"{retry_seed}:{attempt}")
+    jitter = rng.uniform(0.0, exponential * 0.25)
+    computed = min(DEFAULT_MAX_BACKOFF_SECONDS, exponential + jitter)
+    if retry_after_seconds is None:
+        return computed
+    return min(DEFAULT_MAX_BACKOFF_SECONDS, max(computed, retry_after_seconds))
+
+
+def _sleep_with_lambda_deadline(seconds: float, context: Any = None) -> None:
+    if context is not None and hasattr(context, "get_remaining_time_in_millis"):
+        remaining_seconds = context.get_remaining_time_in_millis() / 1000.0
+        if remaining_seconds <= seconds + 1.5:
+            raise RetryBudgetExceeded("Not enough Lambda time remains for another retry delay.")
+    LOGGER.warning("Backing off for %.2f seconds before retrying SAM.gov request.", seconds)
+    time.sleep(seconds)
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = email.utils.parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError):
+            return None
+
+
+def _format_sam_request_date(value: str) -> str:
+    value = value.strip()
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%m/%d/%Y")
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).strftime("%m/%d/%Y")
+    except ValueError as exc:
+        raise IngestError(f"Invalid SAM.gov date '{value}'. Expected MM/DD/YYYY or ISO date.") from exc
+
+
+def _parse_sam_datetime(value: Any) -> Optional[str]:
+    text = _clean_str(value)
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        return None
+
+
+def _clean_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "null":
+        return None
+    return text
+
+
+def _active_status(value: Any) -> str:
+    text = (_clean_str(value) or "unknown").lower()
+    if text in {"yes", "true", "active"}:
+        return "active"
+    if text in {"no", "false", "inactive", "archived"}:
+        return "inactive"
+    return text
+
+
+def _money(value: Any) -> Optional[str]:
+    text = _clean_str(value)
+    if text is None:
+        return None
+    try:
+        return str(Decimal(text.replace(",", "")).quantize(Decimal("0.01")))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _json_object(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if raw in (None, ""):
+        return {}
+    parsed = json.loads(str(raw))
+    if not isinstance(parsed, Mapping):
+        raise IngestError("SQS message body must be a JSON object.")
+    return dict(parsed)
+
+
+def _json_dict(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _string_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [item for item in (_clean_str(v) for v in value) if item]
+    cleaned = _clean_str(value)
+    return [cleaned] if cleaned else []
+
+
+def _split_path(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(".") if part.strip()]
+
+
+def _message_group_id(record: Mapping[str, Any]) -> str:
+    attributes = record.get("attributes") if isinstance(record.get("attributes"), Mapping) else {}
+    return str(attributes.get("MessageGroupId") or "sam-opportunities")
+
+
+def _sqs_safe_group_id(value: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in "._:-" else "-" for ch in value)
+    return (safe or "sam-opportunities")[:128]
+
+
+def _chunk_records(records: List[Dict[str, Any]], max_bytes: int = 220_000) -> Iterable[List[Dict[str, Any]]]:
+    chunk: List[Dict[str, Any]] = []
+    for record in records:
+        candidate = chunk + [record]
+        encoded = json.dumps({"records": candidate}, separators=(",", ":"), default=str).encode("utf-8")
+        if len(encoded) > max_bytes and chunk:
+            yield chunk
+            chunk = [record]
+        elif len(encoded) > max_bytes:
+            key = record.get("natural_key", {})
+            raise IngestError(f"Normalized record is too large for SQS delivery: {key}")
+        else:
+            chunk = candidate
+    if chunk:
+        yield chunk
+
+
+def _sqs_client() -> Any:
+    import boto3
+
+    return boto3.client("sqs")
+
+
+def _redacted(params: Mapping[str, Any]) -> Dict[str, Any]:
+    return {key: ("***" if key == "api_key" else value) for key, value in params.items()}

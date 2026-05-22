@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GovCon CaptureOS</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Federal market intelligence</p>
+        <h1>GovCon CaptureOS</h1>
+      </div>
+      <div class="status-pill" id="api-status">Local demo data</div>
+    </header>
+
+    <main>
+      <section class="filters" aria-label="Opportunity filters">
+        <label>
+          NAICS
+          <input id="naics" inputmode="numeric" value="541512,541715" />
+        </label>
+        <label>
+          PSC
+          <input id="psc" value="DA01,AC12" />
+        </label>
+        <label>
+          Min value
+          <input id="min-value" inputmode="numeric" value="10000000" />
+        </label>
+        <label>
+          Max value
+          <input id="max-value" inputmode="numeric" value="150000000" />
+        </label>
+        <button id="refresh" type="button">Refresh</button>
+      </section>
+
+      <section class="layout">
+        <aside class="opportunity-list" aria-label="Active opportunities">
+          <div class="section-title">
+            <span>Active opportunities</span>
+            <strong id="opportunity-count">0</strong>
+          </div>
+          <div id="opportunities"></div>
+        </aside>
+
+        <section class="analysis" aria-label="Capture analysis">
+          <div class="analysis-header">
+            <div>
+              <p class="eyebrow">Capture analysis</p>
+              <h2 id="analysis-title">Select an opportunity</h2>
+            </div>
+            <div class="pwin" id="pwin">--</div>
+          </div>
+
+          <div class="metric-grid">
+            <div>
+              <span>Confidence</span>
+              <strong id="confidence">--</strong>
+            </div>
+            <div>
+              <span>Historical matches</span>
+              <strong id="match-count">--</strong>
+            </div>
+            <div>
+              <span>Matched obligation</span>
+              <strong id="matched-obligation">--</strong>
+            </div>
+          </div>
+
+          <div class="dashboard-grid">
+            <section>
+              <h3>Competing primes</h3>
+              <div id="primes" class="stack"></div>
+            </section>
+            <section>
+              <h3>Target teaming subs</h3>
+              <div id="subs" class="stack"></div>
+            </section>
+          </div>
+
+          <section>
+            <h3>CALC+ labor benchmarks</h3>
+            <div id="rates" class="rate-table"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

@@ -12,11 +12,20 @@ MAX_PAGES="${GSA_INGEST_MAX_PAGES:-2}"
 BACKFILL_DAYS="${GSA_BACKFILL_DAYS:-30}"
 BACKFILL_MAX_PAGES="${GSA_BACKFILL_MAX_PAGES:-10}"
 
+if [[ -z "${SAM_API_KEY:-}" && -t 0 ]]; then
+  printf "SAM.gov API key: " >&2
+  stty -echo
+  IFS= read -r SAM_API_KEY
+  stty echo
+  printf "\n" >&2
+  export SAM_API_KEY
+fi
+
 if [[ -z "${SAM_API_KEY:-}" ]]; then
   cat >&2 <<'EOF'
 SAM_API_KEY is required.
 
-Export your SAM.gov public API key first:
+Run the script from an interactive terminal and paste your key at the prompt, or export it first:
   export SAM_API_KEY='...'
 
 The key will be stored in AWS Secrets Manager and will not be written to Terraform state.

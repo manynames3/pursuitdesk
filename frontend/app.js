@@ -427,7 +427,7 @@ function renderFitFactors(items) {
             <strong>${escapeHtml(factor.label)}</strong>
             <span class="score">${percent(factor.score)}</span>
           </div>
-          <div class="bar"><span style="width:${clampPercent(factor.score)}%"></span></div>
+          <meter min="0" max="100" value="${clampPercent(factor.score)}">${percent(factor.score)}</meter>
           <div class="row-meta">${escapeHtml(factor.evidence || "")}</div>
         </div>
       `).join("")

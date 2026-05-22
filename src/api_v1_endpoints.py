@@ -16,6 +16,7 @@ from uuid import UUID
 
 import psycopg2
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from psycopg2.extras import RealDictCursor, register_default_jsonb
 from psycopg2.pool import ThreadedConnectionPool
@@ -44,6 +45,14 @@ APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", "https://govcon-captureos.pages.dev
 
 router = APIRouter(prefix="/api/v1", tags=["GovCon CaptureOS v1"])
 app = FastAPI(title="GovCon CaptureOS Presentation API", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["accept", "authorization", "content-type", "x-request-id", "x-captureos-tenant", "x-captureos-user"],
+    max_age=300,
+)
 
 _pool_lock = threading.Lock()
 _pool: Optional[ThreadedConnectionPool] = None

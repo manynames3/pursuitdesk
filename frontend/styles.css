@@ -448,17 +448,27 @@ h3 {
   line-height: 1.35;
 }
 
-.bar {
-  height: 7px;
-  overflow: hidden;
+.factor meter {
+  width: 100%;
+  height: 8px;
+  border: 0;
   border-radius: 999px;
   background: #e2e8f0;
 }
 
-.bar span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
+.factor meter::-webkit-meter-bar {
+  border: 0;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.factor meter::-webkit-meter-optimum-value {
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-blue));
+}
+
+.factor meter::-moz-meter-bar {
+  border-radius: 999px;
   background: linear-gradient(90deg, var(--accent), var(--accent-blue));
 }
 

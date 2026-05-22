@@ -6,7 +6,7 @@ resource "aws_apigatewayv2_api" "http" {
   # VPC Link, private API, or PrivateLink endpoint is created.
   cors_configuration {
     allow_credentials = false
-    allow_headers     = ["authorization", "content-type", "x-request-id", "x-captureos-tenant", "x-captureos-user"]
+    allow_headers     = ["accept", "authorization", "content-type", "x-request-id", "x-captureos-tenant", "x-captureos-user"]
     allow_methods     = ["GET", "POST", "OPTIONS"]
     allow_origins     = var.api_cors_allowed_origins
     max_age           = 300

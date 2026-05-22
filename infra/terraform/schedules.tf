@@ -63,6 +63,8 @@ resource "aws_scheduler_schedule" "sam_opportunities_ingest" {
       dataset          = "sam_opportunities"
       lookback_days    = var.gsa_ingest_lookback_days
       max_pages        = var.gsa_ingest_max_pages
+      ptype            = ["o", "k", "p", "r"]
+      status           = "active"
       direct_db_upsert = true
     })
 

@@ -30,12 +30,21 @@ def seed_mock_data(database_url: str, reset: bool = False) -> Dict[str, int]:
         awards = build_awards(entities)
         sub_awards = build_sub_awards(awards, entities)
         labor_rates = build_calc_labor_rates()
+        workspace = build_workspace_seed(entities, opportunities, awards, sub_awards, labor_rates)
 
         upsert_entities(conn, entities)
         upsert_opportunities(conn, opportunities)
         upsert_awards(conn, awards)
         upsert_sub_awards(conn, sub_awards)
         upsert_calc_labor_rates(conn, labor_rates)
+        upsert_tenants(conn, workspace["tenants"])
+        upsert_tenant_users(conn, workspace["tenant_users"])
+        upsert_customer_profiles(conn, workspace["customer_profiles"])
+        upsert_capture_workflows(conn, workspace["capture_workflows"])
+        upsert_opportunity_notes(conn, workspace["opportunity_notes"])
+        upsert_competitor_watchlist(conn, workspace["competitor_watchlist"])
+        upsert_data_freshness(conn, workspace["data_freshness"])
+        upsert_source_evidence(conn, workspace["source_evidence"])
 
         return {
             "entities": len(entities),
@@ -43,6 +52,14 @@ def seed_mock_data(database_url: str, reset: bool = False) -> Dict[str, int]:
             "awards": len(awards),
             "sub_awards": len(sub_awards),
             "calc_labor_rates": len(labor_rates),
+            "tenants": len(workspace["tenants"]),
+            "tenant_users": len(workspace["tenant_users"]),
+            "customer_profiles": len(workspace["customer_profiles"]),
+            "capture_workflows": len(workspace["capture_workflows"]),
+            "opportunity_notes": len(workspace["opportunity_notes"]),
+            "competitor_watchlist": len(workspace["competitor_watchlist"]),
+            "data_freshness": len(workspace["data_freshness"]),
+            "source_evidence": len(workspace["source_evidence"]),
         }
 
 
@@ -88,6 +105,15 @@ def reset_capture_tables(conn) -> None:
         cur.execute(
             """
             TRUNCATE TABLE
+              capture.audit_events,
+              capture.source_evidence,
+              capture.opportunity_notes,
+              capture.competitor_watchlist,
+              capture.capture_opportunity_workflow,
+              capture.customer_profiles,
+              capture.tenant_users,
+              capture.tenants,
+              capture.data_freshness,
               capture.sub_awards,
               capture.awards,
               capture.opportunities,
@@ -426,6 +452,301 @@ def build_calc_labor_rates() -> List[Dict[str, Any]]:
     return rows
 
 
+def build_workspace_seed(
+    entities: Sequence[Mapping[str, Any]],
+    opportunities: Sequence[Mapping[str, Any]],
+    awards: Sequence[Mapping[str, Any]],
+    sub_awards: Sequence[Mapping[str, Any]],
+    labor_rates: Sequence[Mapping[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    entity_ids = {entity["legal_name"]: entity["entity_id"] for entity in entities}
+    opportunity_ids = {opp["notice_id"]: opp["opportunity_id"] for opp in opportunities}
+    tenant_id = stable_uuid("tenant:demo-growth")
+    capture_lead_id = stable_uuid("tenant-user:demo-growth:capture.lead@example.com")
+    analyst_id = stable_uuid("tenant-user:demo-growth:analyst@example.com")
+
+    tenants = [
+        {
+            "tenant_id": tenant_id,
+            "tenant_slug": "demo-growth",
+            "tenant_name": "Apex Analytica Federal Growth Team",
+            "plan_tier": "enterprise",
+            "data_region": "us-east-1",
+        }
+    ]
+    tenant_users = [
+        {
+            "user_id": capture_lead_id,
+            "tenant_id": tenant_id,
+            "email": "capture.lead@example.com",
+            "display_name": "Capture Lead",
+            "role": "capture_manager",
+            "status": "active",
+            "last_seen_at": NOW,
+        },
+        {
+            "user_id": analyst_id,
+            "tenant_id": tenant_id,
+            "email": "analyst@example.com",
+            "display_name": "Market Analyst",
+            "role": "analyst",
+            "status": "active",
+            "last_seen_at": NOW,
+        },
+    ]
+    customer_profiles = [
+        {
+            "customer_profile_id": stable_uuid("customer-profile:demo-growth:raft"),
+            "tenant_id": tenant_id,
+            "entity_id": entity_ids["Raft LLC"],
+            "company_name": "Apex Analytica Federal Growth Team",
+            "target_naics_codes": ["541512", "541511", "541715"],
+            "target_psc_codes": ["DA01", "DA10", "AC12", "R425"],
+            "target_agency_codes": ["057", "070", "021"],
+            "contract_vehicles": ["GSA MAS IT", "OASIS+", "CIO-SP4 Teaming Pool"],
+            "set_aside_eligibilities": ["Small Business", "8(a) Mentor-Protege"],
+            "clearance_levels": ["Secret", "TS/SCI eligible"],
+            "socioeconomic_tags": ["Small Business", "Agile DevSecOps", "Cloud Native"],
+            "incumbent_agency_codes": ["057", "070"],
+            "past_performance_summary": {
+                "prime_contracts": 1,
+                "subcontracts": 9,
+                "recent_relevant_obligation": 56400000,
+                "strongest_domains": ["cloud_cyber", "case_mgmt", "c5isr_ai"],
+                "agency_relationships": {
+                    "057": "active subcontractor on zero trust and platform engineering programs",
+                    "070": "case management modernization delivery partner",
+                    "021": "emerging C5ISR tactical data partner",
+                },
+            },
+            "pricing_strategy": {
+                "target_blend_discount_to_calc_p75": 0.08,
+                "preferred_labor_mix": "senior architecture with mid-level delivery bench",
+            },
+            "risk_preferences": {
+                "max_single_award_value": 150000000,
+                "avoid_no_incumbent_access": False,
+                "needs_prime_partner_above": 60000000,
+            },
+        }
+    ]
+    workflow_specs = {
+        "SAM-2026-C5ISR-AI-001": ("qualifying", "go", "high", "Gate 2: Teaming", "Two Six and Anduril are likely differentiators for tactical edge credibility."),
+        "SAM-2026-DLA-LOG-002": ("tracking", "undecided", "medium", "Gate 1: Fit", "Needs stronger logistics past performance before bid decision."),
+        "SAM-2026-USAF-ZT-003": ("bid", "go", "high", "Gate 3: Solution", "Excellent cloud and DevSecOps fit; validate incumbent access."),
+        "SAM-2026-NAVY-CYBER-004": ("tracking", "undecided", "medium", "Gate 1: Fit", "Cyber range work is attractive but requires exercise operations partner."),
+        "SAM-2026-DHS-CASE-005": ("qualifying", "go", "high", "Gate 2: Teaming", "Strong DHS case management and migration adjacency."),
+    }
+    capture_workflows = []
+    opportunity_notes = []
+    for index, (notice_id, spec) in enumerate(workflow_specs.items(), start=1):
+        status, decision, priority, stage, rationale = spec
+        opportunity_id = opportunity_ids[notice_id]
+        capture_workflows.append(
+            {
+                "workflow_id": stable_uuid(f"workflow:{tenant_id}:{notice_id}"),
+                "tenant_id": tenant_id,
+                "opportunity_id": opportunity_id,
+                "owner_user_id": capture_lead_id if priority == "high" else analyst_id,
+                "status": status,
+                "go_no_go": decision,
+                "priority": priority,
+                "stage": stage,
+                "next_review_at": datetime(2026, 5, min(28, 22 + index), 15, 0, tzinfo=timezone.utc),
+                "due_at": next(opp["response_deadline"] for opp in opportunities if opp["notice_id"] == notice_id),
+                "tags": ["priority-review", "customer-fit"] if priority == "high" else ["monitor"],
+                "notes": rationale,
+                "decision_rationale": rationale,
+            }
+        )
+        opportunity_notes.append(
+            {
+                "note_id": stable_uuid(f"note:{tenant_id}:{notice_id}:initial"),
+                "tenant_id": tenant_id,
+                "opportunity_id": opportunity_id,
+                "author_user_id": capture_lead_id,
+                "note_type": "capture_note",
+                "body": rationale,
+                "created_at": NOW,
+            }
+        )
+
+    competitor_watchlist = [
+        {
+            "watchlist_id": stable_uuid(f"watchlist:{tenant_id}:lockheed"),
+            "tenant_id": tenant_id,
+            "entity_id": entity_ids["Lockheed Martin Corporation"],
+            "reason": "Repeated Army C5ISR wins with sensor fusion and tactical AI adjacency.",
+            "priority": "high",
+        },
+        {
+            "watchlist_id": stable_uuid(f"watchlist:{tenant_id}:gdit"),
+            "tenant_id": tenant_id,
+            "entity_id": entity_ids["General Dynamics Information Technology, Inc."],
+            "reason": "Air Force cloud incumbent with major zero trust obligation base.",
+            "priority": "high",
+        },
+        {
+            "watchlist_id": stable_uuid(f"watchlist:{tenant_id}:accenture"),
+            "tenant_id": tenant_id,
+            "entity_id": entity_ids["Accenture Federal Services LLC"],
+            "reason": "DHS and cloud modernization competitor with broad delivery bench.",
+            "priority": "medium",
+        },
+    ]
+    data_freshness = [
+        freshness_row("SAM.gov", "Opportunities", "https://api.sam.gov/opportunities/v2/search", len(opportunities), 6),
+        freshness_row("USAspending", "Contract Awards", "https://api.usaspending.gov/api/v2/search/spending_by_award/", len(awards), 24),
+        freshness_row("FSRS", "Subaward Reporting", "https://www.fsrs.gov/", len(sub_awards), 24),
+        freshness_row("SAM.gov", "Entity Management and Exclusions", "https://sam.gov/entity-information", len(entities), 24),
+        freshness_row("GSA CALC+", "Labor Rate Benchmarks", "https://buy.gsa.gov/pricing/", len(labor_rates), 24),
+    ]
+    source_evidence = build_source_evidence(opportunities, awards, sub_awards, labor_rates, entities)
+    return {
+        "tenants": tenants,
+        "tenant_users": tenant_users,
+        "customer_profiles": customer_profiles,
+        "capture_workflows": capture_workflows,
+        "opportunity_notes": opportunity_notes,
+        "competitor_watchlist": competitor_watchlist,
+        "data_freshness": data_freshness,
+        "source_evidence": source_evidence,
+    }
+
+
+def freshness_row(source_system: str, dataset_name: str, source_url: str, record_count: int, sla_hours: int) -> Dict[str, Any]:
+    return {
+        "freshness_id": stable_uuid(f"freshness:{source_system}:{dataset_name}"),
+        "source_system": source_system,
+        "dataset_name": dataset_name,
+        "source_mode": "mock_seed",
+        "last_successful_sync_at": NOW,
+        "last_attempted_sync_at": NOW,
+        "sync_status": "ready",
+        "record_count": record_count,
+        "freshness_sla_hours": sla_hours,
+        "source_url": source_url,
+        "notes": "Synthetic demo seed. Replace with live ingestion watermark when API keys are enabled.",
+    }
+
+
+def build_source_evidence(
+    opportunities: Sequence[Mapping[str, Any]],
+    awards: Sequence[Mapping[str, Any]],
+    sub_awards: Sequence[Mapping[str, Any]],
+    labor_rates: Sequence[Mapping[str, Any]],
+    entities: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    entity_lookup = {entity["entity_id"]: entity for entity in entities}
+    award_lookup = {award["award_id"]: award for award in awards}
+    evidence: List[Dict[str, Any]] = []
+    for opp in opportunities:
+        evidence.append(
+            {
+                "evidence_id": stable_uuid(f"evidence:opportunity:{opp['notice_id']}"),
+                "opportunity_id": opp["opportunity_id"],
+                "award_id": None,
+                "sub_award_id": None,
+                "labor_rate_id": None,
+                "related_entity_id": None,
+                "evidence_type": "opportunity",
+                "source_system": "SAM.gov Opportunities API",
+                "source_record_id": opp["notice_id"],
+                "source_title": opp["title"],
+                "source_url": opp["ui_link"],
+                "source_record_date": opp["posted_at"].date(),
+                "source_amount": opp["estimated_value_max"],
+                "agency_name": opp["funding_agency_name"],
+                "agency_code": opp["funding_agency_code"],
+                "naics_code": opp["naics_code"],
+                "psc_code": opp["psc_code"],
+                "explanation": "Active solicitation source used for title, agency, NAICS/PSC, deadline, value range, and SOW semantic matching.",
+                "confidence": Decimal("1.0000"),
+                "source_payload": {"resource_links": opp["resource_links"], "description_url": opp["description_url"]},
+            }
+        )
+    for award in awards:
+        prime = entity_lookup[award["prime_entity_id"]]
+        evidence.append(
+            {
+                "evidence_id": stable_uuid(f"evidence:award:{award['piid']}"),
+                "opportunity_id": None,
+                "award_id": award["award_id"],
+                "sub_award_id": None,
+                "labor_rate_id": None,
+                "related_entity_id": award["prime_entity_id"],
+                "evidence_type": "award",
+                "source_system": "USAspending Contract Awards API",
+                "source_record_id": award["piid"],
+                "source_title": f"{prime['legal_name']} won {award['title']}",
+                "source_url": f"https://www.usaspending.gov/search/?keywords={award['piid']}",
+                "source_record_date": award["signed_date"],
+                "source_amount": award["total_obligation"],
+                "agency_name": award["funding_agency_name"],
+                "agency_code": award["funding_agency_code"],
+                "naics_code": award["naics_code"],
+                "psc_code": award["psc_code"],
+                "explanation": "Historical prime award used to establish competitor win frequency, agency fit, obligation baseline, and semantic similarity.",
+                "confidence": Decimal("0.9600"),
+                "source_payload": {"raw_prime_vendor_string": award["source_payload"]["raw_prime_vendor_string"]},
+            }
+        )
+    for sub_award in sub_awards:
+        award = award_lookup[sub_award["award_id"]]
+        sub = entity_lookup[sub_award["subcontractor_entity_id"]]
+        prime = entity_lookup[sub_award["prime_entity_id"]]
+        evidence.append(
+            {
+                "evidence_id": stable_uuid(f"evidence:subaward:{sub_award['subaward_number']}"),
+                "opportunity_id": None,
+                "award_id": sub_award["award_id"],
+                "sub_award_id": sub_award["sub_award_id"],
+                "labor_rate_id": None,
+                "related_entity_id": sub_award["subcontractor_entity_id"],
+                "evidence_type": "subaward",
+                "source_system": "FSRS Subaward Reporting API",
+                "source_record_id": sub_award["subaward_number"],
+                "source_title": f"{sub['legal_name']} supported {prime['legal_name']} on {award['piid']}",
+                "source_url": "https://www.fsrs.gov/",
+                "source_record_date": sub_award["action_date"],
+                "source_amount": sub_award["amount"],
+                "agency_name": award["funding_agency_name"],
+                "agency_code": award["funding_agency_code"],
+                "naics_code": sub_award["naics_code"],
+                "psc_code": sub_award["psc_code"],
+                "explanation": "Subaward record used to infer proven teaming links and subcontractor partner depth.",
+                "confidence": Decimal("0.9400"),
+                "source_payload": {"fsrs_report_id": sub_award["fsrs_report_id"]},
+            }
+        )
+    for rate in labor_rates:
+        evidence.append(
+            {
+                "evidence_id": stable_uuid(f"evidence:labor-rate:{rate['labor_rate_id']}"),
+                "opportunity_id": None,
+                "award_id": None,
+                "sub_award_id": None,
+                "labor_rate_id": rate["labor_rate_id"],
+                "related_entity_id": None,
+                "evidence_type": "labor_rate",
+                "source_system": "GSA CALC+ Pricing API",
+                "source_record_id": str(rate["labor_rate_id"]),
+                "source_title": f"{rate['labor_category']} ceiling benchmark",
+                "source_url": "https://buy.gsa.gov/pricing/",
+                "source_record_date": rate["source_updated_at"].date(),
+                "source_amount": rate["ceiling_hourly_rate"],
+                "agency_name": None,
+                "agency_code": None,
+                "naics_code": rate["naics_code"],
+                "psc_code": rate["psc_code"],
+                "explanation": "Labor ceiling benchmark used to compare solicitation labor categories against price-to-win rate pressure.",
+                "confidence": Decimal("0.9300"),
+                "source_payload": {"schedule": rate["schedule"], "site": rate["site"]},
+            }
+        )
+    return evidence
+
+
 def upsert_entities(conn, rows: Sequence[Mapping[str, Any]]) -> None:
     values = [
         (
@@ -681,6 +1002,312 @@ def upsert_calc_labor_rates(conn, rows: Sequence[Mapping[str, Any]]) -> None:
             """,
             values,
             page_size=100,
+        )
+
+
+def upsert_tenants(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (row["tenant_id"], row["tenant_slug"], row["tenant_name"], row["plan_tier"], row["data_region"])
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.tenants (tenant_id, tenant_slug, tenant_name, plan_tier, data_region)
+            VALUES %s
+            ON CONFLICT (tenant_slug)
+            DO UPDATE SET
+              tenant_name = EXCLUDED.tenant_name,
+              plan_tier = EXCLUDED.plan_tier,
+              data_region = EXCLUDED.data_region,
+              updated_at = now();
+            """,
+            values,
+            page_size=50,
+        )
+
+
+def upsert_tenant_users(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (
+            row["user_id"],
+            row["tenant_id"],
+            row["email"],
+            row["display_name"],
+            row["role"],
+            row["status"],
+            row["last_seen_at"],
+        )
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.tenant_users (
+              user_id, tenant_id, email, display_name, role, status, last_seen_at
+            )
+            VALUES %s
+            ON CONFLICT (tenant_id, (lower(email)))
+            DO UPDATE SET
+              display_name = EXCLUDED.display_name,
+              role = EXCLUDED.role,
+              status = EXCLUDED.status,
+              last_seen_at = EXCLUDED.last_seen_at,
+              updated_at = now();
+            """,
+            values,
+            page_size=50,
+        )
+
+
+def upsert_customer_profiles(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (
+            row["customer_profile_id"],
+            row["tenant_id"],
+            row["entity_id"],
+            row["company_name"],
+            row["target_naics_codes"],
+            row["target_psc_codes"],
+            row["target_agency_codes"],
+            row["contract_vehicles"],
+            row["set_aside_eligibilities"],
+            row["clearance_levels"],
+            row["socioeconomic_tags"],
+            row["incumbent_agency_codes"],
+            Json(row["past_performance_summary"]),
+            Json(row["pricing_strategy"]),
+            Json(row["risk_preferences"]),
+        )
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.customer_profiles (
+              customer_profile_id, tenant_id, entity_id, company_name, target_naics_codes,
+              target_psc_codes, target_agency_codes, contract_vehicles, set_aside_eligibilities,
+              clearance_levels, socioeconomic_tags, incumbent_agency_codes, past_performance_summary,
+              pricing_strategy, risk_preferences
+            )
+            VALUES %s
+            ON CONFLICT (tenant_id, company_name)
+            DO UPDATE SET
+              entity_id = EXCLUDED.entity_id,
+              target_naics_codes = EXCLUDED.target_naics_codes,
+              target_psc_codes = EXCLUDED.target_psc_codes,
+              target_agency_codes = EXCLUDED.target_agency_codes,
+              contract_vehicles = EXCLUDED.contract_vehicles,
+              set_aside_eligibilities = EXCLUDED.set_aside_eligibilities,
+              clearance_levels = EXCLUDED.clearance_levels,
+              socioeconomic_tags = EXCLUDED.socioeconomic_tags,
+              incumbent_agency_codes = EXCLUDED.incumbent_agency_codes,
+              past_performance_summary = EXCLUDED.past_performance_summary,
+              pricing_strategy = EXCLUDED.pricing_strategy,
+              risk_preferences = EXCLUDED.risk_preferences,
+              updated_at = now();
+            """,
+            values,
+            page_size=20,
+        )
+
+
+def upsert_capture_workflows(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (
+            row["workflow_id"],
+            row["tenant_id"],
+            row["opportunity_id"],
+            row["owner_user_id"],
+            row["status"],
+            row["go_no_go"],
+            row["priority"],
+            row["stage"],
+            row["next_review_at"],
+            row["due_at"],
+            row["tags"],
+            row["notes"],
+            row["decision_rationale"],
+        )
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.capture_opportunity_workflow (
+              workflow_id, tenant_id, opportunity_id, owner_user_id, status, go_no_go,
+              priority, stage, next_review_at, due_at, tags, notes, decision_rationale
+            )
+            VALUES %s
+            ON CONFLICT (tenant_id, opportunity_id)
+            DO UPDATE SET
+              owner_user_id = EXCLUDED.owner_user_id,
+              status = EXCLUDED.status,
+              go_no_go = EXCLUDED.go_no_go,
+              priority = EXCLUDED.priority,
+              stage = EXCLUDED.stage,
+              next_review_at = EXCLUDED.next_review_at,
+              due_at = EXCLUDED.due_at,
+              tags = EXCLUDED.tags,
+              notes = EXCLUDED.notes,
+              decision_rationale = EXCLUDED.decision_rationale,
+              updated_at = now();
+            """,
+            values,
+            page_size=50,
+        )
+
+
+def upsert_opportunity_notes(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (
+            row["note_id"],
+            row["tenant_id"],
+            row["opportunity_id"],
+            row["author_user_id"],
+            row["note_type"],
+            row["body"],
+            row["created_at"],
+        )
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.opportunity_notes (
+              note_id, tenant_id, opportunity_id, author_user_id, note_type, body, created_at
+            )
+            VALUES %s
+            ON CONFLICT (note_id)
+            DO UPDATE SET
+              body = EXCLUDED.body;
+            """,
+            values,
+            page_size=50,
+        )
+
+
+def upsert_competitor_watchlist(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (row["watchlist_id"], row["tenant_id"], row["entity_id"], row["reason"], row["priority"])
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.competitor_watchlist (
+              watchlist_id, tenant_id, entity_id, reason, priority
+            )
+            VALUES %s
+            ON CONFLICT (tenant_id, entity_id)
+            DO UPDATE SET
+              reason = EXCLUDED.reason,
+              priority = EXCLUDED.priority,
+              updated_at = now();
+            """,
+            values,
+            page_size=50,
+        )
+
+
+def upsert_data_freshness(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (
+            row["freshness_id"],
+            row["source_system"],
+            row["dataset_name"],
+            row["source_mode"],
+            row["last_successful_sync_at"],
+            row["last_attempted_sync_at"],
+            row["sync_status"],
+            row["record_count"],
+            row["freshness_sla_hours"],
+            row["source_url"],
+            row["notes"],
+        )
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.data_freshness (
+              freshness_id, source_system, dataset_name, source_mode, last_successful_sync_at,
+              last_attempted_sync_at, sync_status, record_count, freshness_sla_hours, source_url, notes
+            )
+            VALUES %s
+            ON CONFLICT (source_system, dataset_name)
+            DO UPDATE SET
+              source_mode = EXCLUDED.source_mode,
+              last_successful_sync_at = EXCLUDED.last_successful_sync_at,
+              last_attempted_sync_at = EXCLUDED.last_attempted_sync_at,
+              sync_status = EXCLUDED.sync_status,
+              record_count = EXCLUDED.record_count,
+              freshness_sla_hours = EXCLUDED.freshness_sla_hours,
+              source_url = EXCLUDED.source_url,
+              notes = EXCLUDED.notes,
+              updated_at = now();
+            """,
+            values,
+            page_size=20,
+        )
+
+
+def upsert_source_evidence(conn, rows: Sequence[Mapping[str, Any]]) -> None:
+    values = [
+        (
+            row["evidence_id"],
+            row["opportunity_id"],
+            row["award_id"],
+            row["sub_award_id"],
+            row["labor_rate_id"],
+            row["related_entity_id"],
+            row["evidence_type"],
+            row["source_system"],
+            row["source_record_id"],
+            row["source_title"],
+            row["source_url"],
+            row["source_record_date"],
+            row["source_amount"],
+            row["agency_name"],
+            row["agency_code"],
+            row["naics_code"],
+            row["psc_code"],
+            row["explanation"],
+            row["confidence"],
+            Json(row["source_payload"]),
+        )
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO capture.source_evidence (
+              evidence_id, opportunity_id, award_id, sub_award_id, labor_rate_id,
+              related_entity_id, evidence_type, source_system, source_record_id,
+              source_title, source_url, source_record_date, source_amount, agency_name,
+              agency_code, naics_code, psc_code, explanation, confidence, source_payload
+            )
+            VALUES %s
+            ON CONFLICT (evidence_id)
+            DO UPDATE SET
+              source_title = EXCLUDED.source_title,
+              source_url = EXCLUDED.source_url,
+              source_amount = EXCLUDED.source_amount,
+              explanation = EXCLUDED.explanation,
+              confidence = EXCLUDED.confidence,
+              source_payload = EXCLUDED.source_payload,
+              updated_at = now();
+            """,
+            values,
+            page_size=200,
         )
 
 

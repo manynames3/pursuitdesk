@@ -12,11 +12,18 @@
         <p class="eyebrow">Federal market intelligence</p>
         <h1>GovCon CaptureOS</h1>
       </div>
-      <div class="status-pill" id="api-status">Local demo data</div>
+      <div class="status-group">
+        <div class="status-pill" id="api-status">Local demo data</div>
+        <div class="status-pill subdued" id="security-status">Tenant context pending</div>
+      </div>
     </header>
 
     <main>
       <section class="filters" aria-label="Opportunity filters">
+        <label>
+          Search
+          <input id="search" value="" placeholder="cloud, C5ISR, DHS" />
+        </label>
         <label>
           NAICS
           <input id="naics" inputmode="numeric" value="541512,541715" />
@@ -50,6 +57,12 @@
             <div>
               <p class="eyebrow">Capture analysis</p>
               <h2 id="analysis-title">Select an opportunity</h2>
+              <div class="subhead" id="analysis-subhead">Agency, NAICS, and source status pending</div>
+            </div>
+            <div class="header-actions">
+              <button id="track-go" type="button">Go</button>
+              <button id="track-no-go" class="secondary" type="button">No-go</button>
+              <button id="export-brief" class="secondary" type="button">Export brief</button>
             </div>
             <div class="pwin" id="pwin">--</div>
           </div>
@@ -67,6 +80,48 @@
               <span>Matched obligation</span>
               <strong id="matched-obligation">--</strong>
             </div>
+            <div>
+              <span>Market P-win</span>
+              <strong id="market-pwin">--</strong>
+            </div>
+            <div>
+              <span>Customer delta</span>
+              <strong id="pwin-delta">--</strong>
+            </div>
+            <div>
+              <span>Profile fit</span>
+              <strong id="profile-fit">--</strong>
+            </div>
+          </div>
+
+          <section class="profile-band">
+            <div>
+              <span>Customer profile</span>
+              <strong id="customer-name">--</strong>
+            </div>
+            <div>
+              <span>Vehicles</span>
+              <strong id="customer-vehicles">--</strong>
+            </div>
+            <div>
+              <span>Clearance / eligibility</span>
+              <strong id="customer-clearance">--</strong>
+            </div>
+          </section>
+
+          <div class="dashboard-grid three">
+            <section>
+              <h3>Customer fit</h3>
+              <div id="fit-factors" class="stack"></div>
+            </section>
+            <section>
+              <h3>Workflow</h3>
+              <div id="workflow" class="stack"></div>
+            </section>
+            <section>
+              <h3>Data freshness</h3>
+              <div id="freshness" class="stack"></div>
+            </section>
           </div>
 
           <div class="dashboard-grid">
@@ -83,6 +138,16 @@
           <section>
             <h3>CALC+ labor benchmarks</h3>
             <div id="rates" class="rate-table"></div>
+          </section>
+
+          <section>
+            <h3>Source-backed evidence</h3>
+            <div id="evidence" class="evidence-grid"></div>
+          </section>
+
+          <section>
+            <h3>Capture notes</h3>
+            <div id="notes" class="stack"></div>
           </section>
         </section>
       </section>

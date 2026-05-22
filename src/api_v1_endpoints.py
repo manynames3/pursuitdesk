@@ -6,11 +6,12 @@ import threading
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, Generator, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Generator, Iterable, List, Mapping, Optional, Sequence
 from uuid import UUID
 
 import psycopg2
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request, Response, status
+from pydantic import BaseModel, Field
 from psycopg2.extras import RealDictCursor, register_default_jsonb
 from psycopg2.pool import ThreadedConnectionPool
 
@@ -25,12 +26,27 @@ POOL_MIN_CONN = int(os.getenv("DB_POOL_MIN_CONN", "1"))
 POOL_MAX_CONN = int(os.getenv("DB_POOL_MAX_CONN", "8"))
 ACTIVE_QUERY_TIMEOUT_MS = int(os.getenv("ACTIVE_QUERY_TIMEOUT_MS", "900"))
 ANALYSIS_QUERY_TIMEOUT_MS = int(os.getenv("ANALYSIS_QUERY_TIMEOUT_MS", "2500"))
+DEFAULT_TENANT_SLUG = os.getenv("CAPTUREOS_DEFAULT_TENANT", "demo-growth")
+DEFAULT_USER_EMAIL = os.getenv("CAPTUREOS_DEFAULT_USER", "capture.lead@example.com")
 
 router = APIRouter(prefix="/api/v1", tags=["GovCon CaptureOS v1"])
 app = FastAPI(title="GovCon CaptureOS Presentation API", version="1.0.0")
 
 _pool_lock = threading.Lock()
 _pool: Optional[ThreadedConnectionPool] = None
+
+
+class WorkflowUpdate(BaseModel):
+    status: Optional[str] = Field(None, pattern="^(tracking|qualifying|bid|no_bid|submitted|won|lost)$")
+    go_no_go: Optional[str] = Field(None, pattern="^(go|no_go|undecided)$")
+    priority: Optional[str] = Field(None, pattern="^(low|medium|high)$")
+    stage: Optional[str] = Field(None, min_length=2, max_length=80)
+    owner_user_id: Optional[UUID] = None
+    next_review_at: Optional[datetime] = None
+    due_at: Optional[datetime] = None
+    tags: Optional[List[str]] = Field(None, max_length=12)
+    notes: Optional[str] = Field(None, max_length=4000)
+    decision_rationale: Optional[str] = Field(None, max_length=4000)
 
 
 def get_db_pool() -> ThreadedConnectionPool:
@@ -160,12 +176,99 @@ def get_capture_analysis(
     our_entity_id: Optional[UUID] = Query(None),
     conn=Depends(get_db_connection),
 ) -> Dict[str, Any]:
+    return _build_capture_analysis_response(request, conn, opportunity_id, our_entity_id)
+
+
+@router.get("/capture-analysis/{opportunity_id}/brief.md")
+def get_capture_brief_markdown(
+    request: Request,
+    opportunity_id: str = Path(..., min_length=1, max_length=128),
+    our_entity_id: Optional[UUID] = Query(None),
+    conn=Depends(get_db_connection),
+) -> Response:
+    analysis = _build_capture_analysis_response(request, conn, opportunity_id, our_entity_id)
+    markdown = _render_capture_brief_markdown(analysis)
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"content-disposition": f"attachment; filename=capture-brief-{opportunity_id}.md"},
+    )
+
+
+@router.get("/workspace")
+def get_workspace_summary(request: Request, conn=Depends(get_db_connection)) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    tenant_id = context.get("tenant_id")
+    profile = _fetch_customer_profile(conn, tenant_id)
+    return {
+        "security_context": context,
+        "customer_profile": profile,
+        "data_freshness": _fetch_data_freshness(conn),
+        "competitor_watchlist": _fetch_competitor_watchlist(conn, tenant_id),
+        "pipeline": _fetch_pipeline_summary(conn, tenant_id),
+        "privacy_posture": {
+            "tenant_isolation": "tenant_id scoped queries",
+            "rbac": "admin, capture_manager, analyst, viewer",
+            "audit_events": "workflow mutations are recorded",
+            "demo_auth_mode": "header/default context; replace with Cognito or Cloudflare Access JWT verification before paid production",
+        },
+    }
+
+
+@router.post("/opportunities/{opportunity_id}/track")
+def track_opportunity(
+    request: Request,
+    payload: WorkflowUpdate,
+    opportunity_id: str = Path(..., min_length=1, max_length=128),
+    conn=Depends(get_db_connection),
+) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    if context.get("role") not in {"admin", "capture_manager", "analyst"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role for workflow changes.")
+
+    opportunity = _fetch_opportunity_identity(conn, opportunity_id)
+    if opportunity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Opportunity was not found: {opportunity_id}")
+
+    workflow = _upsert_workflow(conn, context, opportunity["opportunity_id"], payload)
+    _record_audit_event(
+        conn,
+        context=context,
+        request=request,
+        action="workflow.upsert",
+        resource_type="opportunity",
+        resource_id=opportunity["opportunity_id"],
+        metadata={"notice_id": opportunity["notice_id"], "payload": payload.model_dump(mode="json", exclude_none=True)},
+    )
+    conn.commit()
+    return {"workflow": workflow, "security_context": context}
+
+
+def _build_capture_analysis_response(
+    request: Request,
+    conn,
+    opportunity_id: str,
+    our_entity_id: Optional[UUID],
+) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    customer_profile = _fetch_customer_profile(conn, context.get("tenant_id"))
+    selected_entity_id = str(our_entity_id) if our_entity_id else customer_profile.get("entity_id")
+
     try:
         with _query_timeout(conn, ANALYSIS_QUERY_TIMEOUT_MS):
             analysis = find_best_teaming_partners(
                 conn,
                 opportunity_id=opportunity_id,
-                our_entity_id=str(our_entity_id) if our_entity_id else None,
+                our_entity_id=selected_entity_id,
+                historical_limit=75,
+                top_primes=3,
+                subs_per_prime=5,
+                team_sub_limit=5,
+            )
+            market_baseline = find_best_teaming_partners(
+                conn,
+                opportunity_id=opportunity_id,
+                our_entity_id=None,
                 historical_limit=75,
                 top_primes=3,
                 subs_per_prime=5,
@@ -178,13 +281,686 @@ def get_capture_analysis(
         raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Capture analysis query timed out.") from exc
 
     response = _json_safe(analysis)
+    response["market_baseline"] = _json_safe(market_baseline.get("competitive_baseline", {}))
     response["calc_plus_benchmarks"] = benchmarks
+    response["customer_profile"] = customer_profile
+    response["customer_score"] = _customer_score_breakdown(
+        customer_profile,
+        response.get("opportunity", {}),
+        response.get("competitive_baseline", {}),
+        response["market_baseline"],
+    )
+    response["workflow"] = _fetch_workflow(conn, context.get("tenant_id"), response["opportunity"]["opportunity_id"])
+    response["notes"] = _fetch_notes(conn, context.get("tenant_id"), response["opportunity"]["opportunity_id"], limit=5)
+    response["evidence"] = _fetch_evidence_bundle(conn, response, benchmarks)
+    response["data_freshness"] = _fetch_data_freshness(conn)
+    response["security_context"] = context
     response["metadata"] = {
         "api_version": "v1",
         "request_id": request.headers.get("x-request-id"),
         "limits": {"top_primes": 3, "top_subcontractors": 5, "calc_benchmarks": 12},
     }
     return response
+
+
+def _load_request_context(conn, request: Request) -> Dict[str, Any]:
+    tenant_slug = (request.headers.get("x-captureos-tenant") or DEFAULT_TENANT_SLUG).strip()
+    user_email = (request.headers.get("x-captureos-user") or DEFAULT_USER_EMAIL).strip().lower()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                WITH target_tenant AS (
+                  SELECT tenant_id, tenant_slug, tenant_name, plan_tier, data_region
+                  FROM capture.tenants
+                  WHERE tenant_slug = %(tenant_slug)s
+                  LIMIT 1
+                ),
+                requested_user AS (
+                  SELECT u.*
+                  FROM capture.tenant_users u
+                  JOIN target_tenant t ON t.tenant_id = u.tenant_id
+                  WHERE lower(u.email) = %(user_email)s
+                    AND u.status = 'active'
+                  LIMIT 1
+                ),
+                fallback_user AS (
+                  SELECT u.*
+                  FROM capture.tenant_users u
+                  JOIN target_tenant t ON t.tenant_id = u.tenant_id
+                  WHERE u.status = 'active'
+                  ORDER BY
+                    CASE u.role
+                      WHEN 'admin' THEN 1
+                      WHEN 'capture_manager' THEN 2
+                      WHEN 'analyst' THEN 3
+                      ELSE 4
+                    END,
+                    u.created_at
+                  LIMIT 1
+                )
+                SELECT
+                  t.tenant_id::text,
+                  t.tenant_slug,
+                  t.tenant_name,
+                  t.plan_tier,
+                  t.data_region,
+                  COALESCE(ru.user_id, fu.user_id)::text AS user_id,
+                  COALESCE(ru.email, fu.email) AS email,
+                  COALESCE(ru.display_name, fu.display_name) AS display_name,
+                  COALESCE(ru.role, fu.role, 'viewer') AS role
+                FROM target_tenant t
+                LEFT JOIN requested_user ru ON true
+                LEFT JOIN fallback_user fu ON ru.user_id IS NULL;
+                """,
+                {"tenant_slug": tenant_slug, "user_email": user_email},
+            )
+            row = cur.fetchone()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return {
+                "tenant_id": None,
+                "tenant_slug": tenant_slug,
+                "tenant_name": "Uninitialized demo tenant",
+                "plan_tier": "demo",
+                "data_region": "us-east-1",
+                "user_id": None,
+                "email": user_email,
+                "display_name": "Demo User",
+                "role": "viewer",
+                "auth_mode": "uninitialized",
+            }
+        raise
+
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unknown or inactive tenant context.")
+    context = _json_safe(dict(row))
+    context["auth_mode"] = "demo_header_context"
+    context["rbac_scopes"] = _role_scopes(context.get("role"))
+    return context
+
+
+def _role_scopes(role: Optional[str]) -> List[str]:
+    scopes = {
+        "admin": ["read", "write", "admin", "audit"],
+        "capture_manager": ["read", "write", "audit"],
+        "analyst": ["read", "write"],
+        "viewer": ["read"],
+    }
+    return scopes.get(role or "viewer", ["read"])
+
+
+def _fetch_customer_profile(conn, tenant_id: Optional[str]) -> Dict[str, Any]:
+    if not tenant_id:
+        return {}
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  cp.customer_profile_id::text,
+                  cp.tenant_id::text,
+                  cp.entity_id::text,
+                  cp.company_name,
+                  e.legal_name AS resolved_entity_name,
+                  e.canonical_uei,
+                  e.cage_code,
+                  cp.target_naics_codes,
+                  cp.target_psc_codes,
+                  cp.target_agency_codes,
+                  cp.contract_vehicles,
+                  cp.set_aside_eligibilities,
+                  cp.clearance_levels,
+                  cp.socioeconomic_tags,
+                  cp.incumbent_agency_codes,
+                  cp.past_performance_summary,
+                  cp.pricing_strategy,
+                  cp.risk_preferences,
+                  cp.updated_at
+                FROM capture.customer_profiles cp
+                LEFT JOIN capture.entities e ON e.entity_id = cp.entity_id
+                WHERE cp.tenant_id = %(tenant_id)s::uuid
+                ORDER BY cp.updated_at DESC
+                LIMIT 1;
+                """,
+                {"tenant_id": tenant_id},
+            )
+            row = cur.fetchone()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return {}
+        raise
+    return _json_safe(dict(row)) if row else {}
+
+
+def _fetch_workflow(conn, tenant_id: Optional[str], opportunity_id: str) -> Dict[str, Any]:
+    if not tenant_id:
+        return {"status": "untracked", "go_no_go": "undecided"}
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  w.workflow_id::text,
+                  w.tenant_id::text,
+                  w.opportunity_id::text,
+                  w.owner_user_id::text,
+                  u.display_name AS owner_name,
+                  u.email AS owner_email,
+                  w.status,
+                  w.go_no_go,
+                  w.priority,
+                  w.stage,
+                  w.next_review_at,
+                  w.due_at,
+                  w.tags,
+                  w.notes,
+                  w.decision_rationale,
+                  w.updated_at
+                FROM capture.capture_opportunity_workflow w
+                LEFT JOIN capture.tenant_users u ON u.user_id = w.owner_user_id
+                WHERE w.tenant_id = %(tenant_id)s::uuid
+                  AND w.opportunity_id = %(opportunity_id)s::uuid
+                LIMIT 1;
+                """,
+                {"tenant_id": tenant_id, "opportunity_id": opportunity_id},
+            )
+            row = cur.fetchone()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return {"status": "untracked", "go_no_go": "undecided"}
+        raise
+    return _json_safe(dict(row)) if row else {"status": "untracked", "go_no_go": "undecided"}
+
+
+def _fetch_notes(conn, tenant_id: Optional[str], opportunity_id: str, limit: int) -> List[Dict[str, Any]]:
+    if not tenant_id:
+        return []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  n.note_id::text,
+                  n.note_type,
+                  n.body,
+                  n.created_at,
+                  u.display_name AS author_name,
+                  u.email AS author_email
+                FROM capture.opportunity_notes n
+                LEFT JOIN capture.tenant_users u ON u.user_id = n.author_user_id
+                WHERE n.tenant_id = %(tenant_id)s::uuid
+                  AND n.opportunity_id = %(opportunity_id)s::uuid
+                ORDER BY n.created_at DESC
+                LIMIT %(limit)s;
+                """,
+                {"tenant_id": tenant_id, "opportunity_id": opportunity_id, "limit": limit},
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return []
+        raise
+    return [_json_safe(dict(row)) for row in rows]
+
+
+def _fetch_data_freshness(conn) -> List[Dict[str, Any]]:
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  freshness_id::text,
+                  source_system,
+                  dataset_name,
+                  source_mode,
+                  last_successful_sync_at,
+                  last_attempted_sync_at,
+                  sync_status,
+                  record_count,
+                  freshness_sla_hours,
+                  source_url,
+                  notes,
+                  CASE
+                    WHEN last_successful_sync_at IS NULL THEN 'unknown'
+                    WHEN now() - last_successful_sync_at <= make_interval(hours => freshness_sla_hours) THEN 'fresh'
+                    ELSE 'stale'
+                  END AS freshness_state
+                FROM capture.data_freshness
+                ORDER BY source_system, dataset_name;
+                """
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return []
+        raise
+    return [_json_safe(dict(row)) for row in rows]
+
+
+def _fetch_competitor_watchlist(conn, tenant_id: Optional[str]) -> List[Dict[str, Any]]:
+    if not tenant_id:
+        return []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  cw.watchlist_id::text,
+                  cw.priority,
+                  cw.reason,
+                  cw.updated_at,
+                  e.entity_id::text,
+                  e.legal_name,
+                  e.canonical_uei,
+                  e.cage_code
+                FROM capture.competitor_watchlist cw
+                JOIN capture.entities e ON e.entity_id = cw.entity_id
+                WHERE cw.tenant_id = %(tenant_id)s::uuid
+                ORDER BY
+                  CASE cw.priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                  e.legal_name;
+                """,
+                {"tenant_id": tenant_id},
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return []
+        raise
+    return [_json_safe(dict(row)) for row in rows]
+
+
+def _fetch_pipeline_summary(conn, tenant_id: Optional[str]) -> Dict[str, Any]:
+    if not tenant_id:
+        return {"by_status": [], "high_priority": 0}
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  COALESCE(
+                    JSONB_AGG(
+                      JSONB_BUILD_OBJECT('status', status, 'count', status_count)
+                      ORDER BY status
+                    ),
+                    '[]'::jsonb
+                  ) AS by_status,
+                  COALESCE(SUM(status_count) FILTER (WHERE priority = 'high'), 0)::int AS high_priority,
+                  MIN(due_at) FILTER (WHERE status NOT IN ('no_bid', 'won', 'lost')) AS next_due_at
+                FROM (
+                  SELECT status, priority, COUNT(*)::int AS status_count, MIN(due_at) AS due_at
+                  FROM capture.capture_opportunity_workflow
+                  WHERE tenant_id = %(tenant_id)s::uuid
+                  GROUP BY status, priority
+                ) s;
+                """,
+                {"tenant_id": tenant_id},
+            )
+            row = cur.fetchone()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return {"by_status": [], "high_priority": 0}
+        raise
+    return _json_safe(dict(row)) if row else {"by_status": [], "high_priority": 0}
+
+
+def _fetch_evidence_bundle(
+    conn,
+    analysis: Mapping[str, Any],
+    benchmarks: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    opportunity_id = analysis.get("opportunity", {}).get("opportunity_id")
+    award_ids: List[str] = []
+    subaward_numbers: List[str] = []
+    for prime in analysis.get("competing_primes", []):
+        for award in prime.get("representative_awards", [])[:3]:
+            if award.get("award_id"):
+                award_ids.append(str(award["award_id"]))
+        for sub in prime.get("frequent_subcontractors", []):
+            subaward_numbers.extend(str(item) for item in sub.get("subaward_numbers", []) if item)
+    labor_rate_ids = [str(rate["labor_rate_id"]) for rate in benchmarks if rate.get("labor_rate_id")]
+
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  evidence_id::text,
+                  opportunity_id::text,
+                  award_id::text,
+                  sub_award_id::text,
+                  labor_rate_id::text,
+                  related_entity_id::text,
+                  evidence_type,
+                  source_system,
+                  source_record_id,
+                  source_title,
+                  source_url,
+                  source_record_date,
+                  source_amount,
+                  agency_name,
+                  agency_code,
+                  naics_code,
+                  psc_code,
+                  explanation,
+                  confidence,
+                  source_payload
+                FROM capture.source_evidence
+                WHERE
+                  (%(opportunity_id)s::text IS NOT NULL AND opportunity_id::text = %(opportunity_id)s::text)
+                  OR award_id::text = ANY(%(award_ids)s::text[])
+                  OR source_record_id = ANY(%(subaward_numbers)s::text[])
+                  OR labor_rate_id::text = ANY(%(labor_rate_ids)s::text[])
+                ORDER BY
+                  CASE evidence_type
+                    WHEN 'opportunity' THEN 1
+                    WHEN 'award' THEN 2
+                    WHEN 'subaward' THEN 3
+                    WHEN 'labor_rate' THEN 4
+                    ELSE 5
+                  END,
+                  source_record_date DESC NULLS LAST,
+                  source_amount DESC NULLS LAST
+                LIMIT 80;
+                """,
+                {
+                    "opportunity_id": opportunity_id,
+                    "award_ids": award_ids,
+                    "subaward_numbers": subaward_numbers,
+                    "labor_rate_ids": labor_rate_ids,
+                },
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            rows = []
+        else:
+            raise
+
+    items = [_json_safe(dict(row)) for row in rows]
+    by_type: Dict[str, int] = {}
+    for item in items:
+        by_type[item["evidence_type"]] = by_type.get(item["evidence_type"], 0) + 1
+    return {
+        "items": items,
+        "coverage": by_type,
+        "score_factors": _score_factor_evidence(analysis),
+    }
+
+
+def _score_factor_evidence(analysis: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    baseline = analysis.get("competitive_baseline", {})
+    inputs = baseline.get("score_inputs", {})
+    weights = baseline.get("score_weights", {})
+    return [
+        {
+            "factor": "Semantic and structural fit",
+            "score": inputs.get("avg_match_score"),
+            "weight": weights.get("semantic_and_structural_fit"),
+            "why": "Average similarity across historical awards after combining SOW vector distance, NAICS, PSC, agency, and recency.",
+        },
+        {
+            "factor": "Agency match",
+            "score": inputs.get("agency_match_rate"),
+            "weight": weights.get("agency_match"),
+            "why": "Share of historically similar awards funded by the same agency as the active opportunity.",
+        },
+        {
+            "factor": "Available partner depth",
+            "score": inputs.get("partner_depth_score"),
+            "weight": weights.get("available_partner_depth"),
+            "why": "Depth of subcontractors repeatedly attached to primes with similar wins.",
+        },
+        {
+            "factor": "Incumbent concentration",
+            "score": inputs.get("incumbent_concentration"),
+            "weight": weights.get("incumbent_concentration_penalty"),
+            "why": "Penalty when a small set of primes dominates comparable historical awards.",
+        },
+        {
+            "factor": "Customer relevance",
+            "score": inputs.get("our_relevance_signal"),
+            "weight": weights.get("company_relevance_signal"),
+            "why": "Customer-specific prime/subcontract history on comparable work.",
+        },
+    ]
+
+
+def _customer_score_breakdown(
+    profile: Mapping[str, Any],
+    opportunity: Mapping[str, Any],
+    company_baseline: Mapping[str, Any],
+    market_baseline: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if not profile:
+        return {}
+    target_naics = set(profile.get("target_naics_codes") or [])
+    target_psc = set(profile.get("target_psc_codes") or [])
+    target_agencies = set(profile.get("target_agency_codes") or [])
+    incumbent_agencies = set(profile.get("incumbent_agency_codes") or [])
+    opportunity_value = opportunity.get("estimated_value_max") or opportunity.get("estimated_value_min") or 0
+    max_value = (profile.get("risk_preferences") or {}).get("max_single_award_value") or 0
+    market_pwin = float(market_baseline.get("estimated_p_win") or 0)
+    company_pwin = float(company_baseline.get("estimated_p_win") or market_pwin)
+    factors = [
+        {
+            "label": "NAICS fit",
+            "score": 1.0 if opportunity.get("naics_code") in target_naics else 0.35,
+            "evidence": f"{opportunity.get('naics_code') or '--'} against profile targets {', '.join(sorted(target_naics)) or '--'}",
+        },
+        {
+            "label": "PSC fit",
+            "score": 1.0 if opportunity.get("psc_code") in target_psc else 0.4,
+            "evidence": f"{opportunity.get('psc_code') or '--'} against profile targets {', '.join(sorted(target_psc)) or '--'}",
+        },
+        {
+            "label": "Agency relationship",
+            "score": 1.0 if opportunity.get("funding_agency_code") in incumbent_agencies else (0.75 if opportunity.get("funding_agency_code") in target_agencies else 0.35),
+            "evidence": f"{opportunity.get('funding_agency_name') or '--'} relationship depth from customer profile.",
+        },
+        {
+            "label": "Contract vehicle posture",
+            "score": 0.85 if profile.get("contract_vehicles") else 0.25,
+            "evidence": ", ".join(profile.get("contract_vehicles") or ["No vehicles configured"]),
+        },
+        {
+            "label": "Clearance and eligibility",
+            "score": 0.82 if profile.get("clearance_levels") or profile.get("set_aside_eligibilities") else 0.35,
+            "evidence": ", ".join((profile.get("clearance_levels") or []) + (profile.get("set_aside_eligibilities") or [])) or "Not configured",
+        },
+        {
+            "label": "Deal size fit",
+            "score": 1.0 if max_value and opportunity_value and float(opportunity_value) <= float(max_value) else 0.55,
+            "evidence": f"Opportunity ceiling {opportunity_value}; profile max single award {max_value or '--'}",
+        },
+    ]
+    fit_score = sum(float(item["score"]) for item in factors) / len(factors)
+    return {
+        "company_adjusted_p_win": round(company_pwin, 3),
+        "market_baseline_p_win": round(market_pwin, 3),
+        "delta_vs_market": round(company_pwin - market_pwin, 3),
+        "profile_fit_score": round(fit_score, 3),
+        "model_scope": company_baseline.get("model_scope"),
+        "factors": factors,
+    }
+
+
+def _fetch_opportunity_identity(conn, opportunity_id: str) -> Optional[Dict[str, Any]]:
+    predicate, params = _opportunity_predicate(opportunity_id)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            SELECT opportunity_id::text, notice_id, title, response_deadline
+            FROM capture.opportunities
+            WHERE {predicate}
+            LIMIT 1;
+            """,
+            params,
+        )
+        row = cur.fetchone()
+    return _json_safe(dict(row)) if row else None
+
+
+def _upsert_workflow(
+    conn,
+    context: Mapping[str, Any],
+    opportunity_id: str,
+    payload: WorkflowUpdate,
+) -> Dict[str, Any]:
+    tenant_id = context.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant context is required.")
+    owner_user_id = str(payload.owner_user_id) if payload.owner_user_id else context.get("user_id")
+    tags = [tag.strip()[:40] for tag in (payload.tags or []) if tag.strip()]
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            INSERT INTO capture.capture_opportunity_workflow (
+              tenant_id, opportunity_id, owner_user_id, status, go_no_go, priority,
+              stage, next_review_at, due_at, tags, notes, decision_rationale
+            )
+            VALUES (
+              %(tenant_id)s::uuid,
+              %(opportunity_id)s::uuid,
+              %(owner_user_id)s::uuid,
+              COALESCE(%(status)s, 'tracking'),
+              COALESCE(%(go_no_go)s, 'undecided'),
+              COALESCE(%(priority)s, 'medium'),
+              COALESCE(%(stage)s, 'Qualification'),
+              %(next_review_at)s,
+              %(due_at)s,
+              %(tags)s::text[],
+              COALESCE(%(notes)s, ''),
+              COALESCE(%(decision_rationale)s, '')
+            )
+            ON CONFLICT (tenant_id, opportunity_id)
+            DO UPDATE SET
+              owner_user_id = COALESCE(EXCLUDED.owner_user_id, capture.capture_opportunity_workflow.owner_user_id),
+              status = COALESCE(EXCLUDED.status, capture.capture_opportunity_workflow.status),
+              go_no_go = COALESCE(EXCLUDED.go_no_go, capture.capture_opportunity_workflow.go_no_go),
+              priority = COALESCE(EXCLUDED.priority, capture.capture_opportunity_workflow.priority),
+              stage = COALESCE(EXCLUDED.stage, capture.capture_opportunity_workflow.stage),
+              next_review_at = COALESCE(EXCLUDED.next_review_at, capture.capture_opportunity_workflow.next_review_at),
+              due_at = COALESCE(EXCLUDED.due_at, capture.capture_opportunity_workflow.due_at),
+              tags = CASE WHEN array_length(EXCLUDED.tags, 1) IS NULL THEN capture.capture_opportunity_workflow.tags ELSE EXCLUDED.tags END,
+              notes = CASE WHEN EXCLUDED.notes = '' THEN capture.capture_opportunity_workflow.notes ELSE EXCLUDED.notes END,
+              decision_rationale = CASE
+                WHEN EXCLUDED.decision_rationale = '' THEN capture.capture_opportunity_workflow.decision_rationale
+                ELSE EXCLUDED.decision_rationale
+              END,
+              updated_at = now()
+            RETURNING workflow_id::text;
+            """,
+            {
+                "tenant_id": tenant_id,
+                "opportunity_id": opportunity_id,
+                "owner_user_id": owner_user_id,
+                "status": payload.status,
+                "go_no_go": payload.go_no_go,
+                "priority": payload.priority,
+                "stage": payload.stage,
+                "next_review_at": payload.next_review_at,
+                "due_at": payload.due_at,
+                "tags": tags,
+                "notes": payload.notes,
+                "decision_rationale": payload.decision_rationale,
+            },
+        )
+    return _fetch_workflow(conn, tenant_id, opportunity_id)
+
+
+def _record_audit_event(
+    conn,
+    context: Mapping[str, Any],
+    request: Request,
+    action: str,
+    resource_type: str,
+    resource_id: str,
+    metadata: Mapping[str, Any],
+) -> None:
+    client_host = request.client.host if request.client else None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO capture.audit_events (
+              tenant_id, actor_user_id, actor_email, action, resource_type,
+              resource_id, ip_address, user_agent, metadata
+            )
+            VALUES (
+              %(tenant_id)s::uuid,
+              %(actor_user_id)s::uuid,
+              %(actor_email)s,
+              %(action)s,
+              %(resource_type)s,
+              %(resource_id)s,
+              %(ip_address)s::inet,
+              %(user_agent)s,
+              %(metadata)s::jsonb
+            );
+            """,
+            {
+                "tenant_id": context.get("tenant_id"),
+                "actor_user_id": context.get("user_id"),
+                "actor_email": context.get("email"),
+                "action": action,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "ip_address": client_host,
+                "user_agent": request.headers.get("user-agent"),
+                "metadata": json.dumps(_json_safe(metadata)),
+            },
+        )
+
+
+def _render_capture_brief_markdown(analysis: Mapping[str, Any]) -> str:
+    opportunity = analysis.get("opportunity", {})
+    baseline = analysis.get("competitive_baseline", {})
+    market = analysis.get("market_baseline", {})
+    customer = analysis.get("customer_profile", {})
+    workflow = analysis.get("workflow", {})
+    lines = [
+        f"# Capture Brief: {opportunity.get('title', 'Opportunity')}",
+        "",
+        f"- Notice: {opportunity.get('notice_id', '--')}",
+        f"- Agency: {opportunity.get('funding_agency_name', '--')}",
+        f"- NAICS/PSC: {opportunity.get('naics_code', '--')} / {opportunity.get('psc_code', '--')}",
+        f"- Estimated value: {opportunity.get('estimated_value_min', '--')} - {opportunity.get('estimated_value_max', '--')}",
+        f"- Customer profile: {customer.get('company_name', '--')}",
+        f"- Company-adjusted P-win: {baseline.get('estimated_p_win', '--')}",
+        f"- Market baseline P-win: {market.get('estimated_p_win', '--')}",
+        f"- Workflow: {workflow.get('status', 'untracked')} / {workflow.get('go_no_go', 'undecided')}",
+        "",
+        "## Competing Primes",
+    ]
+    for prime in analysis.get("competing_primes", [])[:3]:
+        lines.append(
+            f"- {prime.get('legal_name')} - {prime.get('similar_wins', 0)} similar wins, "
+            f"{prime.get('matched_obligation', 0)} matched obligation"
+        )
+    lines.extend(["", "## Target Teaming Subs"])
+    for sub in analysis.get("target_teaming_subs", [])[:5]:
+        lines.append(
+            f"- {sub.get('legal_name')} - {sub.get('total_engagements', 0)} engagements, "
+            f"{sub.get('associated_prime_count', 0)} prime links"
+        )
+    lines.extend(["", "## Score Evidence"])
+    for factor in analysis.get("evidence", {}).get("score_factors", []):
+        lines.append(f"- {factor.get('factor')}: {factor.get('score')} - {factor.get('why')}")
+    lines.extend(["", "## Source Links"])
+    for item in analysis.get("evidence", {}).get("items", [])[:20]:
+        url = item.get("source_url") or ""
+        suffix = f" ({url})" if url else ""
+        lines.append(f"- [{item.get('source_system')}] {item.get('source_title')}{suffix}")
+    return "\n".join(lines) + "\n"
 
 
 def _fetch_calc_benchmarks(conn, opportunity_id: str, max_rows: int) -> List[Dict[str, Any]]:

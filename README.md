@@ -46,3 +46,15 @@ aws lambda invoke \
   --payload '{"action":"migrate_and_seed","reset":true}' \
   /tmp/captureos-db-admin-response.json
 ```
+
+## Paid-MVP Surfaces
+
+The live demo now exposes the buyer-facing capture workspace layer:
+
+- Source-backed evidence for SAM.gov opportunities, USAspending awards, FSRS subawards, and CALC+ labor rates.
+- Customer-specific scoring with market baseline P-win, company-adjusted P-win, fit factors, contract vehicles, clearances, and eligibility posture.
+- Capture workflow state for go/no-go, stage, owner, priority, notes, and markdown capture brief export.
+- Data freshness watermarks by source system.
+- Tenant, user, RBAC, watchlist, and audit-event tables for production auth integration.
+
+The deployed demo uses `demo_header_context` so the public Cloudflare page can be exercised without a login. Before charging real customers, put API Gateway behind Cognito, Cloudflare Access, or another verified JWT provider and enforce tenant claims instead of default headers.

@@ -246,6 +246,10 @@ def list_active_opportunities(
         o.estimated_value_max,
         o.currency_code,
         o.ui_link,
+        w.status AS workflow_status,
+        w.go_no_go,
+        w.stage AS workflow_stage,
+        w.priority AS workflow_priority,
         (
           CASE WHEN o.sow_embedding IS NOT NULL THEN 0.28 ELSE 0 END
           + CASE WHEN o.response_deadline IS NOT NULL AND o.response_deadline >= now() THEN 0.22 ELSE 0 END
@@ -262,6 +266,9 @@ def list_active_opportunities(
         )::double precision AS dashboard_relevance_score,
         COUNT(*) OVER ()::int AS total_count
       FROM capture.opportunities o
+      LEFT JOIN capture.capture_opportunity_workflow w
+        ON w.opportunity_id = o.opportunity_id
+       AND w.tenant_id = %(tenant_id)s::uuid
       WHERE o.active_status = 'active'
         AND (o.response_deadline IS NULL OR o.response_deadline >= now())
         AND (%(min_value)s::numeric IS NULL OR o.estimated_value_max IS NULL OR o.estimated_value_max >= %(min_value)s::numeric)
@@ -289,6 +296,7 @@ def list_active_opportunities(
         "profile_psc_codes": profile_psc or None,
         "profile_agency_codes": profile_agencies or None,
         "search_text": search_text,
+        "tenant_id": context.get("tenant_id"),
         "limit": limit,
         "offset": offset,
     }
@@ -4063,6 +4071,10 @@ def _opportunity_row(row: Mapping[str, Any]) -> Dict[str, Any]:
         "currency_code": row["currency_code"],
         "ui_link": row["ui_link"],
         "dashboard_relevance_score": round(float(row["dashboard_relevance_score"]), 4),
+        "workflow_status": row.get("workflow_status"),
+        "go_no_go": row.get("go_no_go") or "undecided",
+        "workflow_stage": row.get("workflow_stage"),
+        "workflow_priority": row.get("workflow_priority"),
     }
 
 

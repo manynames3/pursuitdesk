@@ -149,6 +149,7 @@ let totalOpportunities = 0;
 let customerTeams = [...fallbackTeams];
 let selectedTenantSlug = localStorage.getItem("captureosTenantSlug") || "demo-growth";
 let consultantWorkspace = null;
+let decisionSavePending = false;
 
 const els = {
   apiStatus: document.querySelector("#api-status"),
@@ -157,6 +158,8 @@ const els = {
   refresh: document.querySelector("#refresh"),
   trackGo: document.querySelector("#track-go"),
   trackNoGo: document.querySelector("#track-no-go"),
+  decisionStatus: document.querySelector("#decision-status"),
+  decisionSummary: document.querySelector("#decision-summary"),
   proposalWriterOpen: document.querySelector("#proposal-writer-open"),
   proposalWriterOverlay: document.querySelector("#proposal-writer-overlay"),
   proposalWriterBackdrop: document.querySelector("#proposal-writer-backdrop"),
@@ -427,25 +430,23 @@ async function updateWorkflow(goNoGo) {
     status: goNoGo === "go" ? "qualifying" : "no_bid",
     priority: goNoGo === "go" ? "high" : "low",
     stage: goNoGo === "go" ? "Gate 2: Teaming" : "Closed: No-bid",
-    decision_rationale: goNoGo === "go" ? "Marked go from executive dashboard." : "Marked no-go from executive dashboard.",
+    decision_rationale: goNoGo === "go" ? "Advisor marked this opportunity as Go." : "Advisor marked this opportunity as No-go.",
   };
+  const optimisticWorkflow = { ...(currentAnalysis?.workflow || {}), ...payload };
+  applyWorkflowState(optimisticWorkflow);
+  setDecisionSavePending(true);
   try {
     const result = await fetchJson(`${apiBaseUrl}/api/v1/opportunities/${encodeURIComponent(currentOpportunityId)}/track`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(payload),
     });
-    if (currentAnalysis) {
-      currentAnalysis.workflow = result.workflow;
-      renderWorkflow(result.workflow);
-    }
+    applyWorkflowState(result.workflow || optimisticWorkflow);
     setApiStatus("Live API");
   } catch (error) {
-    if (currentAnalysis) {
-      currentAnalysis.workflow = { ...(currentAnalysis.workflow || {}), ...payload };
-      renderWorkflow(currentAnalysis.workflow);
-    }
     setApiStatus(offlineStatusLabel);
+  } finally {
+    setDecisionSavePending(false);
   }
 }
 
@@ -993,9 +994,16 @@ function renderMonitoringAlerts(alerts) {
 }
 
 function opportunityButton(item) {
+  const decision = opportunityDecision(item);
+  const decisionBadge = decision !== "undecided"
+    ? `<span class="badge ${escapeHtml(decisionClass(decision))}">${escapeHtml(decisionLabel(decision))}</span>`
+    : "";
   return `
     <button class="opp" type="button" data-id="${escapeHtml(item.opportunity_id || item.notice_id)}">
-      <strong>${escapeHtml(item.title)}</strong>
+      <span class="opp-title-line">
+        <strong>${escapeHtml(item.title)}</strong>
+        ${decisionBadge}
+      </span>
       <span class="opp-meta">
         <span>${escapeHtml(item.funding_agency_name || "Agency pending")}</span>
         <span>${escapeHtml(item.naics_code || "--")}/${escapeHtml(item.psc_code || "--")}</span>
@@ -1015,6 +1023,7 @@ function renderAnalysis(data) {
   const customer = data.customer_profile || {};
   const customerScore = data.customer_score || {};
   const market = data.market_baseline || {};
+  const workflow = data.workflow || {};
 
   els.analysisTitle.textContent = opportunity.title || "Capture analysis";
   els.analysisSubhead.textContent = [
@@ -1034,6 +1043,7 @@ function renderAnalysis(data) {
   els.matchCount.textContent = baseline.historical_match_count ?? "--";
   els.matchedObligation.textContent = money(baseline.total_matched_obligation);
   renderRecommendedAction(data.recommended_action || {});
+  renderDecisionState(workflow);
   renderMiniList(els.captureTasks, data.capture_tasks || [], (item) => `${item.task} · ${item.owner || "Owner pending"}`);
   renderMiniList(els.opportunityDeliverables, data.deliverables || [], (item) => `${item.name} · ${item.status}`);
 
@@ -1043,7 +1053,7 @@ function renderAnalysis(data) {
 
   renderSecurity(data.security_context || {});
   renderFitFactors(customerScore.factors || []);
-  renderWorkflow(data.workflow || {});
+  renderWorkflow(workflow);
   renderFreshness(data.data_freshness || []);
   renderPastPerformance(data.past_performance || []);
   renderBilling(data.billing || {});
@@ -1062,6 +1072,60 @@ function renderRecommendedAction(action) {
   if (action.action) {
     els.recommendedAction.classList.add(`action-${action.action}`);
   }
+}
+
+function applyWorkflowState(workflow) {
+  if (!currentAnalysis) return;
+  currentAnalysis.workflow = workflow;
+  renderWorkflow(workflow);
+  renderDecisionState(workflow);
+  updateLoadedOpportunityDecision(workflow);
+}
+
+function renderDecisionState(workflow = {}) {
+  const decision = workflow.go_no_go || "undecided";
+  const label = decisionLabel(decision);
+  const isDecided = decision !== "undecided";
+  const statusText = decisionSavePending
+    ? `Saving ${label} decision...`
+    : isDecided
+      ? `Advisor decision: ${label}`
+      : "Advisor decision pending";
+
+  els.decisionStatus.textContent = statusText;
+  els.decisionStatus.className = `decision-status is-${decisionClass(decision)}`;
+  els.decisionSummary.textContent = isDecided
+    ? `${label} decision is recorded for this opportunity. ${workflow.decision_rationale || ""}`.trim()
+    : "No advisor decision has been recorded for this opportunity.";
+  els.decisionSummary.className = `decision-summary is-${decisionClass(decision)}`;
+
+  els.trackGo.classList.toggle("is-active", decision === "go");
+  els.trackNoGo.classList.toggle("is-active", decision === "no_go");
+  els.trackGo.setAttribute("aria-pressed", String(decision === "go"));
+  els.trackNoGo.setAttribute("aria-pressed", String(decision === "no_go"));
+  els.trackGo.disabled = decisionSavePending || !currentOpportunityId;
+  els.trackNoGo.disabled = decisionSavePending || !currentOpportunityId;
+}
+
+function setDecisionSavePending(isPending) {
+  decisionSavePending = isPending;
+  renderDecisionState(currentAnalysis?.workflow || {});
+}
+
+function updateLoadedOpportunityDecision(workflow) {
+  loadedOpportunities = loadedOpportunities.map((item) => {
+    const itemId = item.opportunity_id || item.notice_id;
+    if (itemId !== currentOpportunityId && item.notice_id !== currentOpportunityId) return item;
+    return {
+      ...item,
+      go_no_go: workflow.go_no_go,
+      workflow_status: workflow.status,
+      workflow_stage: workflow.stage,
+      workflow_priority: workflow.priority,
+    };
+  });
+  renderOpportunities(loadedOpportunities, totalOpportunities);
+  setActiveOpportunity(currentOpportunityId);
 }
 
 function renderMiniList(element, items, template) {
@@ -1091,13 +1155,15 @@ function renderFitFactors(items) {
 }
 
 function renderWorkflow(workflow) {
+  const decision = workflow.go_no_go || "undecided";
   els.workflow.innerHTML = `
     <div class="row">
       <div class="row-title">
-        <strong>${escapeHtml(titleCase(workflow.status || "untracked"))}</strong>
-        <span class="score">${escapeHtml((workflow.go_no_go || "undecided").replace("_", "-"))}</span>
+        <strong>${escapeHtml(decision === "undecided" ? titleCase(workflow.status || "untracked") : decisionLabel(decision))}</strong>
+        <span class="badge ${escapeHtml(decisionClass(decision))}">${escapeHtml(decisionLabel(decision))}</span>
       </div>
       <div class="row-meta">
+        <span>${escapeHtml(titleCase(workflow.status || "untracked"))}</span>
         <span>${escapeHtml(workflow.stage || "Qualification")}</span>
         <span>${escapeHtml(workflow.priority || "medium")} priority</span>
         <span>${escapeHtml(workflow.owner_name || "Unassigned")}</span>
@@ -1616,6 +1682,22 @@ function formatSourceMode(mode) {
   if (mode === "customer_import") return "Client import";
   if (mode === "mock_seed") return "Imported baseline";
   return titleCase(mode || "Source sync");
+}
+
+function opportunityDecision(item) {
+  return item.go_no_go || item.workflow?.go_no_go || "undecided";
+}
+
+function decisionLabel(value) {
+  if (value === "go") return "Go";
+  if (value === "no_go") return "No-go";
+  return "Undecided";
+}
+
+function decisionClass(value) {
+  if (value === "go") return "go";
+  if (value === "no_go") return "no-go";
+  return "undecided";
 }
 
 function renderLocalBrief(data) {

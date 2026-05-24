@@ -187,10 +187,11 @@
               <p class="eyebrow">Capture analysis</p>
               <h2 id="analysis-title">Select an opportunity</h2>
               <div class="subhead" id="analysis-subhead">Agency, NAICS, and source status pending</div>
+              <div id="decision-status" class="decision-status is-undecided">Advisor decision pending</div>
             </div>
             <div class="header-actions">
-              <button id="track-go" type="button">Go</button>
-              <button id="track-no-go" class="secondary" type="button">No-go</button>
+              <button id="track-go" class="decision-button decision-go" type="button" aria-pressed="false">Mark Go</button>
+              <button id="track-no-go" class="decision-button decision-no-go" type="button" aria-pressed="false">Mark No-go</button>
               <button id="proposal-writer-open" class="proposal-writer-trigger" type="button" disabled>
                 <svg aria-hidden="true" viewBox="0 0 24 24">
                   <path d="M12 20h9" />
@@ -238,6 +239,7 @@
               <span>Recommended action</span>
               <strong id="recommended-action">--</strong>
               <p id="recommended-rationale">Select an opportunity to generate bid/no-bid guidance.</p>
+              <div id="decision-summary" class="decision-summary">Advisor decision pending.</div>
             </div>
             <div>
               <span>Capture task plan</span>

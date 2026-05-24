@@ -175,6 +175,37 @@ button.secondary:hover {
   color: var(--accent-blue);
 }
 
+button.decision-button {
+  min-width: 104px;
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--text);
+}
+
+button.decision-go {
+  border-color: #86efac;
+  color: #166534;
+}
+
+button.decision-go:hover,
+button.decision-go.is-active {
+  border-color: #15803d;
+  background: #15803d;
+  color: white;
+}
+
+button.decision-no-go {
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+button.decision-no-go:hover,
+button.decision-no-go.is-active {
+  border-color: #b91c1c;
+  background: #b91c1c;
+  color: white;
+}
+
 .layout {
   display: grid;
   grid-template-columns: minmax(300px, 390px) minmax(0, 1fr);
@@ -366,6 +397,13 @@ button.secondary:hover {
   line-height: 1.35;
 }
 
+.opp-title-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .opp-meta,
 .row-meta {
   display: flex;
@@ -399,6 +437,38 @@ button.secondary:hover {
   margin-top: 6px;
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.decision-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  margin-top: 10px;
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.decision-status.is-go,
+.decision-summary.is-go {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.decision-status.is-no-go,
+.decision-summary.is-no-go {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.decision-status.is-undecided,
+.decision-summary.is-undecided {
+  background: #f1f5f9;
+  color: #475569;
 }
 
 .header-actions {
@@ -512,6 +582,15 @@ button.secondary:hover {
   color: var(--text);
   font-size: 0.88rem;
   line-height: 1.45;
+}
+
+.decision-summary {
+  margin-top: 12px;
+  border-radius: 6px;
+  padding: 9px 10px;
+  font-size: 0.82rem;
+  font-weight: 800;
+  line-height: 1.4;
 }
 
 .action-pursue {
@@ -638,6 +717,21 @@ h3 {
 .badge.pursue {
   background: #dcfce7;
   color: #166534;
+}
+
+.badge.go {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.badge.no-go {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.badge.undecided {
+  background: #f1f5f9;
+  color: #475569;
 }
 
 .badge.team {

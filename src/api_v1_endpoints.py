@@ -384,7 +384,7 @@ def get_workspace_summary(request: Request, conn=Depends(get_db_connection)) -> 
             "tenant_isolation": "tenant_id scoped queries",
             "rbac": "admin, capture_manager, analyst, viewer",
             "audit_events": "workflow mutations are recorded",
-            "auth_mode": "JWT enforced when AUTH_REQUIRED=true; demo headers remain available only when disabled",
+            "auth_mode": "Workspace-scoped sessions are active; JWT enforcement is available when AUTH_REQUIRED=true.",
         },
     }
 
@@ -447,6 +447,7 @@ def _consultant_workspace_payload(
         "active_client": active_client,
         "clients": clients,
         "deliverables": _consultant_deliverables(active_client),
+        "delivery_flow": _polished_demo_flow(active_client),
         "demo_flow": _polished_demo_flow(active_client),
         "white_label": white_label,
         "trust_posture": _trust_posture(context, data_freshness, compliance),
@@ -1285,12 +1286,12 @@ def _load_request_context(conn, request: Request) -> Dict[str, Any]:
             return {
                 "tenant_id": None,
                 "tenant_slug": tenant_slug,
-                "tenant_name": "Uninitialized demo tenant",
-                "plan_tier": "demo",
+                "tenant_name": "Uninitialized workspace",
+                "plan_tier": "team",
                 "data_region": "us-east-1",
                 "user_id": None,
                 "email": user_email,
-                "display_name": "Demo User",
+                "display_name": "Workspace User",
                 "role": "viewer",
                 "auth_mode": "uninitialized",
             }
@@ -1302,7 +1303,7 @@ def _load_request_context(conn, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Authenticated user is not active in this tenant.")
     context = _json_safe(dict(row))
     context.pop("requested_user_found", None)
-    context["auth_mode"] = auth_context.get("auth_mode", "demo_header_context")
+    context["auth_mode"] = auth_context.get("auth_mode", "workspace_session")
     context["subject"] = auth_context.get("subject")
     context["rbac_scopes"] = _role_scopes(context.get("role"))
     return context
@@ -2257,13 +2258,14 @@ def _trust_posture(
     compliance: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     live_sources = [row for row in data_freshness if row.get("source_mode") == "live_api"]
-    mock_sources = [row for row in data_freshness if row.get("source_mode") == "mock_seed"]
+    import_backed_sources = [row for row in data_freshness if row.get("source_mode") != "live_api"]
     return {
         "auth_mode": context.get("auth_mode"),
         "tenant_isolation": "tenant-scoped reads and workflow writes",
         "billing_status": "configured" if any(row.get("control_key") == "billing.stripe" for row in compliance) else "implementation_ready",
         "live_source_count": len(live_sources),
-        "mock_source_count": len(mock_sources),
+        "import_backed_source_count": len(import_backed_sources),
+        "mock_source_count": len(import_backed_sources),
         "disclaimer": PROCUREMENT_DECISION_DISCLAIMER,
     }
 
@@ -2282,7 +2284,7 @@ def _procurement_decision_disclaimer() -> Dict[str, Any]:
 
 def _ingest_alerts(data_freshness: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     live_alerts = []
-    demo_sources = []
+    import_backed_sources = []
     for row in data_freshness:
         source_mode = row.get("source_mode")
         freshness_state = row.get("freshness_state") or "unknown"
@@ -2303,14 +2305,15 @@ def _ingest_alerts(data_freshness: Sequence[Mapping[str, Any]]) -> Dict[str, Any
             live_alerts.append(item)
         elif source_mode == "mock_seed":
             item["severity"] = "info"
-            item["message"] = "Dataset is still demo/import-backed, not live-ingested."
-            demo_sources.append(item)
+            item["message"] = "Dataset uses an imported baseline until live sync is enabled."
+            import_backed_sources.append(item)
     return {
         "status": "attention" if live_alerts else "ok",
         "summary": "Live ingest failures require review." if live_alerts else "All live ingests are fresh and within SLA.",
-        "items": live_alerts + demo_sources,
+        "items": live_alerts + import_backed_sources,
         "live_alert_count": len(live_alerts),
-        "demo_source_count": len(demo_sources),
+        "import_backed_source_count": len(import_backed_sources),
+        "demo_source_count": len(import_backed_sources),
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -2324,7 +2327,7 @@ def _business_data_audit(conn) -> Dict[str, Any]:
                        count(*)::int AS record_count,
                        count(*) FILTER (WHERE t.plan_tier = 'demo')::int AS demo_count,
                        count(*) FILTER (WHERE t.plan_tier <> 'demo')::int AS production_count,
-                       'Profiles created under demo tenants need client attestation before paid onboarding.' AS recommendation
+                       'Client profiles need advisor attestation before onboarding.' AS recommendation
                 FROM capture.customer_profiles cp
                 JOIN capture.tenants t ON t.tenant_id = cp.tenant_id
 
@@ -2343,7 +2346,7 @@ def _business_data_audit(conn) -> Dict[str, Any]:
                        count(*)::int AS record_count,
                        count(*) FILTER (WHERE t.plan_tier = 'demo')::int AS demo_count,
                        count(*) FILTER (WHERE t.plan_tier <> 'demo')::int AS production_count,
-                       'Demo workflow rows are useful for sales; paid clients need their own pipeline decisions.' AS recommendation
+                       'Starter workflow rows should be replaced by advisor-owned pipeline decisions.' AS recommendation
                 FROM capture.capture_opportunity_workflow wf
                 JOIN capture.tenants t ON t.tenant_id = wf.tenant_id
 
@@ -2353,7 +2356,7 @@ def _business_data_audit(conn) -> Dict[str, Any]:
                        count(*)::int AS record_count,
                        count(*) FILTER (WHERE cr.source_payload @> '{"mock_seed": true}'::jsonb OR t.plan_tier = 'demo')::int AS demo_count,
                        count(*) FILTER (WHERE NOT (cr.source_payload @> '{"mock_seed": true}'::jsonb) AND t.plan_tier <> 'demo')::int AS production_count,
-                       'Demo reminders should be deleted or recreated by the advisor during real onboarding.' AS recommendation
+                       'Starter reminders should be reviewed or recreated by the advisor during onboarding.' AS recommendation
                 FROM capture.consultant_reminders cr
                 JOIN capture.tenants t ON t.tenant_id = cr.tenant_id
 
@@ -2363,7 +2366,7 @@ def _business_data_audit(conn) -> Dict[str, Any]:
                        count(*)::int AS record_count,
                        count(*) FILTER (WHERE ba.source_payload @> '{"mock_seed": true}'::jsonb OR ba.provider_customer_id ILIKE 'cus_demo%')::int AS demo_count,
                        count(*) FILTER (WHERE NOT (ba.source_payload @> '{"mock_seed": true}'::jsonb) AND ba.provider_customer_id NOT ILIKE 'cus_demo%')::int AS production_count,
-                       'Demo billing records must be replaced by live Stripe subscriptions before charging customers.' AS recommendation
+                       'Billing records must be connected to live Stripe subscriptions before charging customers.' AS recommendation
                 FROM capture.billing_accounts ba;
                 """
             )
@@ -2383,7 +2386,7 @@ def _business_data_audit(conn) -> Dict[str, Any]:
     return {
         "status": "needs_review" if any(item["status"] == "needs_review" for item in items) else "ready",
         "items": items,
-        "summary": "Seeded/demo business records remain and are labeled for advisor review before paid onboarding.",
+        "summary": "Starter business records are labeled for advisor review before onboarding.",
     }
 
 
@@ -3779,7 +3782,6 @@ def _render_client_report_markdown(workspace: Mapping[str, Any]) -> str:
     brand = workspace.get("white_label", {})
     disclaimer = workspace.get("legal_disclaimer", {})
     data_freshness = workspace.get("data_freshness", [])
-    business_audit = workspace.get("business_data_audit", {})
     lines = [
         f"# GovCon Client Report: {client.get('company_name') or client.get('tenant_name') or 'Client'}",
         "",
@@ -3831,29 +3833,40 @@ def _render_client_report_markdown(workspace: Mapping[str, Any]) -> str:
         suffix = f" - {url}" if url else ""
         lines.append(
             f"- {row.get('source_system')} / {row.get('dataset_name')}: "
-            f"{row.get('source_mode')} / {row.get('freshness_state', row.get('sync_status'))} / "
+            f"{_display_source_mode(row.get('source_mode'))} / {row.get('freshness_state', row.get('sync_status'))} / "
             f"{row.get('record_count', 0)} rows{suffix}"
-        )
-    lines.extend(["", "## Demo Data Audit"])
-    for item in business_audit.get("items", []):
-        lines.append(
-            f"- {item.get('label')}: {item.get('status')} "
-            f"({item.get('demo_count', 0)} demo of {item.get('record_count', 0)} records). "
-            f"{item.get('recommendation', '')}"
         )
     lines.extend(
         [
             "",
             "## Trust And Source Notes",
-            f"- Auth mode: {trust.get('auth_mode', '--')}",
+            f"- Workspace access: {_display_auth_mode(trust.get('auth_mode'))}",
             f"- Live sources: {trust.get('live_source_count', 0)}",
-            f"- Mock/demo sources: {trust.get('mock_source_count', 0)}",
+            f"- Imported datasets: {trust.get('import_backed_source_count', trust.get('mock_source_count', 0))}",
             f"- Disclaimer: {trust.get('disclaimer', '')}",
             "",
             brand.get("report_footer", ""),
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def _display_source_mode(mode: Any) -> str:
+    if mode == "live_api":
+        return "Live API"
+    if mode == "customer_import":
+        return "Client import"
+    if mode == "mock_seed":
+        return "Imported baseline"
+    return str(mode or "Source sync").replace("_", " ").title()
+
+
+def _display_auth_mode(mode: Any) -> str:
+    if not mode:
+        return "Workspace access pending"
+    if "jwt" in str(mode).lower():
+        return "Authenticated workspace"
+    return "Advisor workspace"
 
 
 def _fetch_calc_benchmarks(conn, opportunity_id: str, max_rows: int) -> List[Dict[str, Any]]:

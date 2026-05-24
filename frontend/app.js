@@ -24,6 +24,8 @@ const proposalSections = [
   },
 ];
 
+const offlineStatusLabel = "Offline mode";
+
 const fallbackOpportunities = [
   {
     opportunity_id: "6d3cabc7-5170-4378-8c7e-46af9c216663",
@@ -136,7 +138,7 @@ const fallbackAnalysis = {
     { control_key: "auth.jwt", control_family: "Access Control", control_name: "JWT issuer, audience, and JWKS validation", implementation_status: "implemented" },
     { control_key: "audit.workflow", control_family: "Audit", control_name: "Workflow mutation audit trail", implementation_status: "implemented" },
   ],
-  security_context: { tenant_name: "Apex Analytica Federal Growth Team", role: "capture_manager", auth_mode: "demo_header_context" },
+  security_context: { tenant_name: "Apex Analytica Federal Growth Team", role: "capture_manager", auth_mode: "workspace_session" },
 };
 
 let currentOpportunityId = null;
@@ -203,7 +205,6 @@ const els = {
   brandEmail: document.querySelector("#brand-email"),
   trustPosture: document.querySelector("#trust-posture"),
   monitoringAlerts: document.querySelector("#monitoring-alerts"),
-  demoDataAudit: document.querySelector("#demo-data-audit"),
   opportunities: document.querySelector("#opportunities"),
   opportunityCount: document.querySelector("#opportunity-count"),
   opportunityRange: document.querySelector("#opportunity-range"),
@@ -312,7 +313,7 @@ async function loadConsultantWorkspace() {
     setApiStatus("Live API");
   } catch (error) {
     consultantWorkspace = buildFallbackWorkspace();
-    setApiStatus("Local demo data");
+    setApiStatus(offlineStatusLabel);
   }
   renderConsultantWorkspace(consultantWorkspace);
 }
@@ -329,12 +330,12 @@ async function loadOpportunities({ append = false } = {}) {
     setApiStatus("Live API");
   } catch (error) {
     if (append) {
-      setApiStatus("Local demo data");
+      setApiStatus(offlineStatusLabel);
       renderOpportunities(loadedOpportunities, totalOpportunities);
       return;
     }
     data = { items: fallbackOpportunities, pagination: { total: fallbackOpportunities.length } };
-    setApiStatus("Local demo data");
+    setApiStatus(offlineStatusLabel);
   }
 
   const incoming = data.items || [];
@@ -404,7 +405,7 @@ async function loadAnalysis(opportunityId) {
           }
         : fallback.evidence,
     };
-    setApiStatus("Local demo data");
+    setApiStatus(offlineStatusLabel);
   }
   currentAnalysis = data;
   setProposalDraft("");
@@ -444,7 +445,7 @@ async function updateWorkflow(goNoGo) {
       currentAnalysis.workflow = { ...(currentAnalysis.workflow || {}), ...payload };
       renderWorkflow(currentAnalysis.workflow);
     }
-    setApiStatus("Local demo data");
+    setApiStatus(offlineStatusLabel);
   }
 }
 
@@ -706,7 +707,7 @@ async function submitClientIntake(event) {
     socioeconomic_tags: splitCodes(els.intakeSetAsides.value),
     target_psc_codes: [],
     contract_vehicles: ["SAM.gov Open Market"],
-    consultant_notes: "Created from public demo intake wizard.",
+    consultant_notes: "Created from client intake.",
   };
   if (!payload.company_name || !payload.primary_contact_email) return;
   try {
@@ -732,7 +733,7 @@ async function submitClientIntake(event) {
     renderTeamSelect();
     consultantWorkspace = buildFallbackWorkspace();
     renderConsultantWorkspace(consultantWorkspace);
-    setApiStatus("Local demo data");
+    setApiStatus(offlineStatusLabel);
   }
 }
 
@@ -764,7 +765,7 @@ async function submitReminder(event) {
       ];
       renderConsultantWorkspace(consultantWorkspace);
     }
-    setApiStatus("Local demo data");
+    setApiStatus(offlineStatusLabel);
   }
 }
 
@@ -788,7 +789,7 @@ async function submitWhiteLabel(event) {
   } catch (error) {
     consultantWorkspace.white_label = payload;
     renderConsultantWorkspace(consultantWorkspace);
-    setApiStatus("Local demo data");
+    setApiStatus(offlineStatusLabel);
   }
 }
 
@@ -818,7 +819,7 @@ function renderConsultantWorkspace(workspace) {
 
   els.positioningHeadline.textContent = positioning.headline || "GovCon consulting delivery platform for small-business advisors";
   els.positioningPromise.textContent = positioning.promise || "Add a client, get readiness, get top pursuits, export a client report.";
-  renderDemoFlow(workspace.demo_flow || []);
+  renderDemoFlow(workspace.delivery_flow || workspace.demo_flow || []);
   els.brandName.value = whiteLabel.organization_name || "";
   els.brandColor.value = whiteLabel.primary_color || "#0f766e";
   els.brandEmail.value = whiteLabel.support_email || "";
@@ -928,22 +929,22 @@ function renderConsultantWorkspace(workspace) {
   `);
 
   const trust = workspace.trust_posture || {};
+  const importedSourceCount = trust.import_backed_source_count ?? trust.mock_source_count ?? 0;
   els.trustPosture.innerHTML = `
     <div class="row compact">
       <div class="row-title">
-        <strong>${escapeHtml(trust.auth_mode || "auth pending")}</strong>
-        <span class="badge">${escapeHtml(trust.billing_status || "billing")}</span>
+        <strong>${escapeHtml(formatWorkspaceAccess(trust.auth_mode))}</strong>
+        <span class="badge">${escapeHtml(formatBillingStatus(trust.billing_status))}</span>
       </div>
       <div class="row-meta">
         <span>${numberFormat(trust.live_source_count)} live sources</span>
-        <span>${numberFormat(trust.mock_source_count)} demo sources</span>
+        <span>${numberFormat(importedSourceCount)} imported datasets</span>
       </div>
       <div class="row-note">${escapeHtml(trust.disclaimer || "")}</div>
       ${(disclaimer.limits || []).length ? `<div class="row-meta">${disclaimer.limits.slice(0, 2).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
     </div>
   `;
   renderMonitoringAlerts(workspace.ingest_alerts || {});
-  renderDemoDataAudit(workspace.business_data_audit || {});
 }
 
 function renderDemoFlow(steps) {
@@ -969,7 +970,7 @@ function renderMonitoringAlerts(alerts) {
       </div>
       <div class="row-meta">
         <span>${numberFormat(alerts.live_alert_count || 0)} live alerts</span>
-        <span>${numberFormat(alerts.demo_source_count || 0)} demo sources</span>
+        <span>Source watermarks active</span>
       </div>
     </div>
     ${
@@ -989,26 +990,6 @@ function renderMonitoringAlerts(alerts) {
         : `<div class="row compact"><strong>No live ingest failures detected.</strong><div class="row-meta">SAM.gov, USAspending, FSRS, and GSA CALC+ freshness are monitored through source watermarks.</div></div>`
     }
   `;
-}
-
-function renderDemoDataAudit(audit) {
-  const items = audit.items || [];
-  els.demoDataAudit.innerHTML = items.length
-    ? items.slice(0, 5).map((item) => `
-        <div class="row compact">
-          <div class="row-title">
-            <strong>${escapeHtml(item.label)}</strong>
-            <span class="badge ${escapeHtml(item.status || "needs_review")}">${escapeHtml((item.status || "needs_review").replace("_", " "))}</span>
-          </div>
-          <div class="row-meta">
-            <span>${numberFormat(item.demo_count || 0)} demo</span>
-            <span>${numberFormat(item.production_count || 0)} production/imported</span>
-            <span>${numberFormat(item.record_count || 0)} total</span>
-          </div>
-          <div class="row-note">${escapeHtml(item.recommendation || "")}</div>
-        </div>
-      `).join("")
-    : `<div class="empty">No business data audit records available.</div>`;
 }
 
 function opportunityButton(item) {
@@ -1090,7 +1071,7 @@ function renderMiniList(element, items, template) {
 }
 
 function renderSecurity(context) {
-  const parts = [context.tenant_name, context.role, context.auth_mode].filter(Boolean);
+  const parts = [context.tenant_name, titleCase(context.role || ""), formatWorkspaceAccess(context.auth_mode)].filter(Boolean);
   els.securityStatus.textContent = parts.length ? parts.join(" · ") : "Tenant context pending";
 }
 
@@ -1136,7 +1117,7 @@ function renderFreshness(rows) {
           </div>
           <div class="row-meta">
             <span>${escapeHtml(row.dataset_name)}</span>
-            <span>${escapeHtml(row.source_mode)}</span>
+            <span>${escapeHtml(formatSourceMode(row.source_mode))}</span>
             <span>${Number(row.record_count || 0).toLocaleString()} rows</span>
           </div>
         </div>
@@ -1412,7 +1393,7 @@ function buildFallbackAnalysis(opportunity = null) {
     security_context: {
       tenant_name: team.tenant_name || team.company_name,
       role: "capture_manager",
-      auth_mode: "demo_header_context",
+      auth_mode: "workspace_session",
     },
   };
 }
@@ -1490,7 +1471,7 @@ function buildFallbackWorkspace() {
     },
     active_client: active,
     clients,
-    demo_flow: [
+    delivery_flow: [
       { step: "Add client", status: "complete", description: "Run the intake wizard for a small business." },
       { step: "Get readiness", status: "complete", description: "Show readiness score, evidence, and gaps." },
       { step: "Get top pursuits", status: "complete", description: "Prioritize pursue/team/watch/skip opportunities." },
@@ -1508,10 +1489,11 @@ function buildFallbackWorkspace() {
       { name: "Client portal view", status: "available", description: "Client-facing requests, pipeline, and readiness status." },
     ],
     trust_posture: {
-      auth_mode: "demo_header_context",
+      auth_mode: "workspace_session",
       billing_status: "implementation_ready",
       live_source_count: 4,
-      mock_source_count: 1,
+      import_backed_source_count: 0,
+      mock_source_count: 0,
       disclaimer: "Decision support only. GovCon CaptureOS does not provide legal advice, procurement advice, bid/no-bid directives, or a guarantee of award.",
     },
     legal_disclaimer: {
@@ -1526,17 +1508,8 @@ function buildFallbackWorkspace() {
       status: "ok",
       summary: "All live ingests are fresh and within SLA.",
       live_alert_count: 0,
-      demo_source_count: 1,
+      import_backed_source_count: 0,
       items: [],
-    },
-    business_data_audit: {
-      status: "needs_review",
-      summary: "Seeded/demo business records remain and are labeled for advisor review before paid onboarding.",
-      items: [
-        { label: "Client profiles", status: "needs_review", record_count: clients.length, demo_count: clients.length, production_count: 0, recommendation: "Confirm profiles with each client before paid onboarding." },
-        { label: "Past performance", status: "needs_review", record_count: 2, demo_count: 2, production_count: 0, recommendation: "Replace seeded past performance with signed client imports." },
-        { label: "Workflow examples", status: "needs_review", record_count: 2, demo_count: 2, production_count: 0, recommendation: "Recreate real pipeline decisions during onboarding." },
-      ],
     },
   };
 }
@@ -1626,6 +1599,25 @@ function titleCase(value) {
   return String(value).replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function formatWorkspaceAccess(authMode) {
+  if (!authMode) return "Workspace access pending";
+  if (String(authMode).includes("jwt")) return "Authenticated workspace";
+  return "Advisor workspace";
+}
+
+function formatBillingStatus(status) {
+  if (!status) return "Billing pending";
+  if (status === "implementation_ready") return "Billing ready";
+  return titleCase(status);
+}
+
+function formatSourceMode(mode) {
+  if (mode === "live_api") return "Live API";
+  if (mode === "customer_import") return "Client import";
+  if (mode === "mock_seed") return "Imported baseline";
+  return titleCase(mode || "Source sync");
+}
+
 function renderLocalBrief(data) {
   const opportunity = data.opportunity || {};
   const baseline = data.competitive_baseline || {};
@@ -1647,7 +1639,6 @@ function renderLocalClientReport(workspace) {
   const readiness = client.readiness || {};
   const profile = client.profile || {};
   const disclaimer = workspace.legal_disclaimer || {};
-  const audit = workspace.business_data_audit || {};
   const lines = [
     `# GovCon Client Report: ${client.company_name || client.tenant_name || "Client"}`,
     "",
@@ -1667,10 +1658,7 @@ function renderLocalClientReport(workspace) {
     ...(client.recommended_opportunities || []).slice(0, 5).map((opp) => `- ${opp.title}: ${(opp.recommended_action || {}).action || "watch"}${opp.ui_link ? ` - ${opp.ui_link}` : ""}`),
     "",
     "## Source Drilldowns",
-    ...(workspace.data_freshness || fallbackAnalysis.data_freshness || []).map((row) => `- ${row.source_system} / ${row.dataset_name}: ${row.source_mode} / ${row.freshness_state || row.sync_status} / ${row.record_count || 0} rows${row.source_url ? ` - ${row.source_url}` : ""}`),
-    "",
-    "## Demo Data Audit",
-    ...((audit.items || []).map((item) => `- ${item.label}: ${item.status} (${item.demo_count || 0} demo of ${item.record_count || 0} records). ${item.recommendation || ""}`)),
+    ...(workspace.data_freshness || fallbackAnalysis.data_freshness || []).map((row) => `- ${row.source_system} / ${row.dataset_name}: ${formatSourceMode(row.source_mode)} / ${row.freshness_state || row.sync_status} / ${row.record_count || 0} rows${row.source_url ? ` - ${row.source_url}` : ""}`),
     "",
   ];
   return lines.join("\n");

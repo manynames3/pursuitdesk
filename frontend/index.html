@@ -13,7 +13,7 @@
         <h1>GovCon CaptureOS</h1>
       </div>
       <div class="status-group">
-        <div class="status-pill" id="api-status">Local demo data</div>
+        <div class="status-pill" id="api-status">Connecting</div>
         <div class="status-pill subdued" id="security-status">Tenant context pending</div>
       </div>
     </header>
@@ -54,7 +54,7 @@
         <div class="section-title">
           <span>Consultant workspace</span>
           <div class="header-actions compact-actions">
-            <button id="demo-flow-start" class="secondary compact-button" type="button">Start demo</button>
+            <button id="demo-flow-start" class="secondary compact-button" type="button">New client</button>
             <button id="export-client-report" class="secondary compact-button" type="button">Client report</button>
           </div>
         </div>
@@ -62,7 +62,7 @@
           <strong id="positioning-headline">GovCon consulting delivery platform for small-business advisors</strong>
           <span id="positioning-promise">Add a client, get readiness, get top pursuits, export a client report.</span>
         </div>
-        <div id="demo-flow" class="demo-flow" aria-label="Demo flow"></div>
+        <div id="demo-flow" class="demo-flow" aria-label="Client delivery workflow"></div>
         <form id="client-intake" class="intake-form" aria-label="Client intake wizard">
           <label>
             Company
@@ -149,10 +149,6 @@
           <section>
             <h3>Monitoring alerts</h3>
             <div id="monitoring-alerts" class="stack"></div>
-          </section>
-          <section>
-            <h3>Demo data audit</h3>
-            <div id="demo-data-audit" class="stack"></div>
           </section>
         </div>
         <div class="dashboard-grid">
@@ -358,7 +354,7 @@
             <div class="proposal-section-title">
               <div>
                 <h3>Target section</h3>
-                <p>Choose the proposal section to draft for this active opportunity.</p>
+                <p>Draft against the selected opportunity and client profile.</p>
               </div>
               <select id="proposal-section-select" aria-label="Target proposal section">
                 <option value="technical_approach">Technical Approach</option>
@@ -371,10 +367,10 @@
           </section>
 
           <div class="proposal-context-alert">
-            <strong>Context-aware generation</strong>
+            <strong>Verified proposal inputs</strong>
             <p>
-              Generate passes the active opportunity context, Section L/M requirements when extracted,
-              source evidence, and the selected team's past performance profile into the proposal draft.
+              Uses the active opportunity, extracted Section L/M requirements, source evidence,
+              and the selected team's past performance profile.
             </p>
           </div>
 

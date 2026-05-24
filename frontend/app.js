@@ -1,6 +1,29 @@
 const apiBaseUrl = window.CAPTUREOS_API_BASE_URL || "";
 const opportunityPageSize = 25;
 
+const proposalSections = [
+  {
+    key: "technical_approach",
+    label: "Technical Approach",
+    description: "Draft a compliant technical response mapped to SOW/PWS needs.",
+  },
+  {
+    key: "management_plan",
+    label: "Management Plan",
+    description: "Create governance, staffing, cadence, risk, and delivery narrative.",
+  },
+  {
+    key: "past_performance",
+    label: "Past Performance",
+    description: "Align relevant project history to the evaluation criteria.",
+  },
+  {
+    key: "quality_assurance",
+    label: "Quality Assurance",
+    description: "Build QA/QC, inspection, reporting, and corrective-action language.",
+  },
+];
+
 const fallbackOpportunities = [
   {
     opportunity_id: "6d3cabc7-5170-4378-8c7e-46af9c216663",
@@ -118,6 +141,7 @@ const fallbackAnalysis = {
 
 let currentOpportunityId = null;
 let currentAnalysis = null;
+let selectedProposalSection = "technical_approach";
 let loadedOpportunities = [];
 let totalOpportunities = 0;
 let customerTeams = [...fallbackTeams];
@@ -131,6 +155,19 @@ const els = {
   refresh: document.querySelector("#refresh"),
   trackGo: document.querySelector("#track-go"),
   trackNoGo: document.querySelector("#track-no-go"),
+  proposalWriterOpen: document.querySelector("#proposal-writer-open"),
+  proposalWriterOverlay: document.querySelector("#proposal-writer-overlay"),
+  proposalWriterBackdrop: document.querySelector("#proposal-writer-backdrop"),
+  proposalWriterClose: document.querySelector("#proposal-writer-close"),
+  proposalWriterOpportunity: document.querySelector("#proposal-writer-opportunity"),
+  proposalSectionSelect: document.querySelector("#proposal-section-select"),
+  proposalSectionCards: document.querySelector("#proposal-section-cards"),
+  proposalGenerate: document.querySelector("#proposal-generate"),
+  proposalCopy: document.querySelector("#proposal-copy"),
+  proposalDownload: document.querySelector("#proposal-download"),
+  proposalLoading: document.querySelector("#proposal-loading"),
+  proposalOutput: document.querySelector("#proposal-output"),
+  proposalError: document.querySelector("#proposal-error"),
   exportBrief: document.querySelector("#export-brief"),
   exportClientReport: document.querySelector("#export-client-report"),
   demoFlowStart: document.querySelector("#demo-flow-start"),
@@ -204,6 +241,9 @@ els.teamSelect.addEventListener("change", async () => {
   localStorage.setItem("captureosTenantSlug", selectedTenantSlug);
   currentOpportunityId = null;
   currentAnalysis = null;
+  closeProposalWriter();
+  setProposalDraft("");
+  els.proposalWriterOpen.disabled = true;
   await loadConsultantWorkspace();
   await loadOpportunities({ append: false });
 });
@@ -211,6 +251,23 @@ els.refresh.addEventListener("click", () => loadOpportunities({ append: false })
 els.loadMore.addEventListener("click", () => loadOpportunities({ append: true }));
 els.trackGo.addEventListener("click", () => updateWorkflow("go"));
 els.trackNoGo.addEventListener("click", () => updateWorkflow("no_go"));
+els.proposalWriterOpen.addEventListener("click", openProposalWriter);
+els.proposalWriterBackdrop.addEventListener("click", closeProposalWriter);
+els.proposalWriterClose.addEventListener("click", closeProposalWriter);
+els.proposalSectionSelect.addEventListener("change", () => selectProposalSection(els.proposalSectionSelect.value));
+els.proposalSectionCards.addEventListener("click", (event) => {
+  const card = event.target.closest("[data-proposal-section]");
+  if (card) selectProposalSection(card.dataset.proposalSection);
+});
+els.proposalGenerate.addEventListener("click", generateProposalDraft);
+els.proposalCopy.addEventListener("click", copyProposalDraft);
+els.proposalDownload.addEventListener("click", downloadProposalDraft);
+els.proposalOutput.addEventListener("input", syncProposalDraftActions);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.proposalWriterOverlay.hidden) {
+    closeProposalWriter();
+  }
+});
 els.exportBrief.addEventListener("click", exportBrief);
 els.exportClientReport.addEventListener("click", exportClientReport);
 els.demoFlowStart.addEventListener("click", () => els.intakeCompany.focus());
@@ -218,6 +275,7 @@ els.clientIntake.addEventListener("submit", submitClientIntake);
 els.reminderForm.addEventListener("submit", submitReminder);
 els.whiteLabelForm.addEventListener("submit", submitWhiteLabel);
 
+renderProposalSectionCards();
 initialize();
 
 async function initialize() {
@@ -348,6 +406,8 @@ async function loadAnalysis(opportunityId) {
     setApiStatus("Local demo data");
   }
   currentAnalysis = data;
+  setProposalDraft("");
+  setProposalError("");
   renderAnalysis(data);
 }
 
@@ -413,6 +473,194 @@ async function exportClientReport() {
   } catch (error) {
     fallback();
   }
+}
+
+function renderProposalSectionCards() {
+  els.proposalSectionCards.innerHTML = proposalSections.map((section) => `
+    <button class="proposal-section-card" type="button" data-proposal-section="${escapeHtml(section.key)}">
+      <strong>${escapeHtml(section.label)}</strong>
+      <span>${escapeHtml(section.description)}</span>
+    </button>
+  `).join("");
+  selectProposalSection(selectedProposalSection);
+}
+
+function selectProposalSection(sectionKey) {
+  if (!proposalSections.some((section) => section.key === sectionKey)) return;
+  selectedProposalSection = sectionKey;
+  els.proposalSectionSelect.value = sectionKey;
+  els.proposalSectionCards.querySelectorAll("[data-proposal-section]").forEach((card) => {
+    card.classList.toggle("active", card.dataset.proposalSection === sectionKey);
+  });
+}
+
+function openProposalWriter() {
+  if (!currentOpportunityId) return;
+  syncProposalWriterContext();
+  els.proposalWriterOverlay.hidden = false;
+  document.body.classList.add("proposal-drawer-open");
+  els.proposalGenerate.focus();
+}
+
+function closeProposalWriter() {
+  els.proposalWriterOverlay.hidden = true;
+  document.body.classList.remove("proposal-drawer-open");
+}
+
+function syncProposalWriterContext() {
+  const opportunity = currentAnalysis?.opportunity || findLoadedOpportunity(currentOpportunityId) || {};
+  els.proposalWriterOpportunity.textContent = opportunity.title
+    ? `${opportunity.title} · ${opportunity.funding_agency_name || "Agency pending"}`
+    : "Select an opportunity to draft against.";
+}
+
+async function generateProposalDraft() {
+  if (!currentOpportunityId) return;
+
+  const payload = buildProposalWriterPayload();
+  setProposalGenerating(true);
+  setProposalError("");
+
+  try {
+    const response = await fetchJson(`${apiBaseUrl}/api/v1/proposal-writer`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    setProposalDraft(response.draft || renderLocalProposalDraft(payload));
+    setApiStatus("Live API");
+  } catch (error) {
+    setProposalDraft(renderLocalProposalDraft(payload));
+    setProposalError("Live proposal endpoint is unavailable; showing a local structured draft from the active opportunity context.");
+  } finally {
+    setProposalGenerating(false);
+  }
+}
+
+function buildProposalWriterPayload() {
+  const analysis = currentAnalysis || buildFallbackAnalysis(findLoadedOpportunity(currentOpportunityId));
+  const opportunity = analysis.opportunity || findLoadedOpportunity(currentOpportunityId) || {};
+  const team = selectedTeam();
+  const targetSection = proposalSections.find((section) => section.key === selectedProposalSection) || proposalSections[0];
+
+  return {
+    opportunity_id: currentOpportunityId,
+    opportunity_title: opportunity.title || "Selected opportunity",
+    target_section: targetSection.label,
+    rfp_requirements: {
+      opportunity,
+      section_l: analysis.document_requirements?.section_l || "Section L extraction pending; validate solicitation instructions before client delivery.",
+      section_m: analysis.document_requirements?.section_m || "Section M extraction pending; validate evaluation factors before client delivery.",
+      recommended_action: analysis.recommended_action || {},
+      capture_tasks: analysis.capture_tasks || [],
+      deliverables: analysis.deliverables || [],
+      evidence: (analysis.evidence?.items || []).slice(0, 12),
+      data_freshness: analysis.data_freshness || [],
+    },
+    company_past_performance: {
+      customer_profile: analysis.customer_profile || team,
+      past_performance: analysis.past_performance || [],
+      fit_factors: analysis.customer_score?.factors || [],
+    },
+  };
+}
+
+function setProposalGenerating(isGenerating) {
+  els.proposalGenerate.disabled = isGenerating;
+  els.proposalSectionSelect.disabled = isGenerating;
+  els.proposalSectionCards.querySelectorAll("[data-proposal-section]").forEach((card) => {
+    card.disabled = isGenerating;
+  });
+  els.proposalCopy.disabled = isGenerating || !els.proposalOutput.value.trim();
+  els.proposalDownload.disabled = isGenerating || !els.proposalOutput.value.trim();
+  els.proposalLoading.hidden = !isGenerating;
+  els.proposalOutput.hidden = isGenerating;
+  els.proposalGenerate.innerHTML = isGenerating
+    ? `<span class="proposal-spinner" aria-hidden="true"></span>Generating...`
+    : `<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z" /></svg>Generate Draft`;
+}
+
+function setProposalDraft(text) {
+  els.proposalOutput.value = text || "";
+  syncProposalDraftActions();
+}
+
+function syncProposalDraftActions() {
+  const hasDraft = Boolean(els.proposalOutput.value.trim());
+  els.proposalCopy.disabled = !hasDraft;
+  els.proposalDownload.disabled = !hasDraft;
+}
+
+function setProposalError(message) {
+  els.proposalError.textContent = message;
+  els.proposalError.hidden = !message;
+}
+
+async function copyProposalDraft() {
+  if (!els.proposalOutput.value.trim()) return;
+  await navigator.clipboard.writeText(els.proposalOutput.value);
+  els.proposalCopy.textContent = "Copied";
+  window.setTimeout(() => {
+    els.proposalCopy.textContent = "Copy";
+  }, 1600);
+}
+
+function downloadProposalDraft() {
+  if (!els.proposalOutput.value.trim()) return;
+  const section = selectedProposalSection.replace(/_/g, "-");
+  downloadText(els.proposalOutput.value, `proposal-${section}-${currentOpportunityId}.md`);
+}
+
+function renderLocalProposalDraft(payload) {
+  const opportunity = payload.rfp_requirements.opportunity || {};
+  const profile = payload.company_past_performance.customer_profile || {};
+  const evidence = payload.rfp_requirements.evidence || [];
+  const pastPerformance = payload.company_past_performance.past_performance || [];
+  return [
+    `# ${payload.target_section}: ${payload.opportunity_title}`,
+    "",
+    "## Decision Support Notice",
+    "Decision support only. Validate solicitation instructions, evaluation factors, pricing, representations, and compliance requirements before client delivery.",
+    "",
+    "## Source Context",
+    `- Notice: ${opportunity.notice_id || payload.opportunity_id}`,
+    `- Agency: ${opportunity.funding_agency_name || "--"}`,
+    `- NAICS/PSC: ${opportunity.naics_code || "--"} / ${opportunity.psc_code || "--"}`,
+    `- Source: ${opportunity.ui_link || "Source link pending"}`,
+    "",
+    "## Active Document Context",
+    `- Section L: ${payload.rfp_requirements.section_l || "Extraction pending; validate instructions before client delivery."}`,
+    `- Section M: ${payload.rfp_requirements.section_m || "Extraction pending; validate evaluation factors before client delivery."}`,
+    "",
+    `## Draft ${payload.target_section}`,
+    proposalSectionNarrative(payload.target_section, profile, evidence, pastPerformance),
+    "",
+    "## Evidence To Weave In",
+    ...(evidence.length ? evidence.slice(0, 6).map((item) => `- ${item.source_system || "Source"}: ${item.source_title || item.explanation || "Evidence record"}${item.source_url ? ` (${item.source_url})` : ""}`) : ["- Source-backed evidence pending; validate solicitation documents before finalizing."]),
+    "",
+    "## Past Performance Anchors",
+    ...(pastPerformance.length ? pastPerformance.slice(0, 4).map((item) => `- ${item.title || item.contract_number}: ${item.agency_name || "Agency pending"} · ${money(item.obligated_amount)}`) : ["- Import client past performance before sending a client-ready proposal section."]),
+    "",
+    "## Compliance Checks Before Use",
+    "- Confirm Section L instructions and page/format limits.",
+    "- Confirm Section M evaluation factors and relative importance.",
+    "- Confirm all claims are supported by client evidence.",
+    "- Confirm pricing, eligibility, and representations outside this drafting assistant.",
+    "",
+  ].join("\n");
+}
+
+function proposalSectionNarrative(targetSection, profile, evidence, pastPerformance) {
+  const companyName = profile.company_name || profile.tenant_name || "the client";
+  const proofPoint = pastPerformance[0]?.title || "relevant federal delivery history";
+  const sourceSignal = evidence[0]?.explanation || "the current solicitation and source-backed capture evidence";
+  const narratives = {
+    "Technical Approach": `${companyName} will deliver a disciplined technical approach that maps each work requirement to accountable execution steps, measurable deliverables, and documented acceptance criteria. The team will validate requirements at kickoff, maintain a traceable compliance matrix, and use recurring reviews to keep performance aligned with ${sourceSignal}. This approach should be refined against the final SOW/PWS and every solicitation amendment before submission.`,
+    "Management Plan": `${companyName} will manage performance through a named program lead, clear escalation paths, recurring status reviews, and risk tracking tied to schedule, quality, staffing, and customer acceptance. The management approach should reference ${proofPoint} where it supports staffing, transition, communication, or delivery credibility for this opportunity.`,
+    "Past Performance": `${companyName} should present past performance that is recent, relevant, and outcome-oriented. Lead with ${proofPoint}, then connect scope, agency environment, contract role, value, and measurable results to the evaluation factors. Avoid unsupported claims and identify any relevance gaps the evaluator may question.`,
+    "Quality Assurance": `${companyName} will use a quality assurance process built around requirement traceability, peer review, inspection checkpoints, corrective action tracking, and customer-visible reporting. The final response should tie each QA control to the solicitation's acceptance criteria and the operational risks surfaced by the capture analysis.`,
+  };
+  return narratives[targetSection] || narratives["Technical Approach"];
 }
 
 async function submitClientIntake(event) {
@@ -764,6 +1012,8 @@ function renderAnalysis(data) {
   ]
     .filter(Boolean)
     .join(" · ");
+  els.proposalWriterOpen.disabled = !currentOpportunityId;
+  syncProposalWriterContext();
   els.pwin.textContent = percent(baseline.estimated_p_win);
   els.marketPwin.textContent = percent(market.estimated_p_win);
   els.pwinDelta.textContent = signedPercent(customerScore.delta_vs_market);

@@ -195,6 +195,16 @@
             <div class="header-actions">
               <button id="track-go" type="button">Go</button>
               <button id="track-no-go" class="secondary" type="button">No-go</button>
+              <button id="proposal-writer-open" class="proposal-writer-trigger" type="button" disabled>
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M12 20h9" />
+                  <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z" />
+                  <path d="M4 5h.01" />
+                  <path d="M8 2h.01" />
+                  <path d="M3 10h.01" />
+                </svg>
+                Proposal Writer
+              </button>
               <button id="export-brief" class="secondary" type="button">Export brief</button>
             </div>
             <div class="pwin" id="pwin">--</div>
@@ -316,6 +326,98 @@
         </section>
       </section>
     </main>
+
+    <div id="proposal-writer-overlay" class="proposal-overlay" hidden>
+      <button id="proposal-writer-backdrop" class="proposal-backdrop" type="button" aria-label="Close Proposal Writer"></button>
+      <aside class="proposal-drawer" role="dialog" aria-modal="true" aria-labelledby="proposal-writer-title">
+        <header class="proposal-drawer-header">
+          <div>
+            <span class="proposal-kicker">
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z" />
+                <path d="M4 5h.01" />
+                <path d="M8 2h.01" />
+                <path d="M3 10h.01" />
+              </svg>
+              AI-assisted drafting
+            </span>
+            <h2 id="proposal-writer-title">Proposal Writer</h2>
+            <p id="proposal-writer-opportunity">Select an opportunity to draft against.</p>
+          </div>
+          <button id="proposal-writer-close" class="icon-button" type="button" aria-label="Close Proposal Writer">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </button>
+        </header>
+
+        <div class="proposal-drawer-body">
+          <section>
+            <div class="proposal-section-title">
+              <div>
+                <h3>Target section</h3>
+                <p>Choose the proposal section to draft for this active opportunity.</p>
+              </div>
+              <select id="proposal-section-select" aria-label="Target proposal section">
+                <option value="technical_approach">Technical Approach</option>
+                <option value="management_plan">Management Plan</option>
+                <option value="past_performance">Past Performance</option>
+                <option value="quality_assurance">Quality Assurance</option>
+              </select>
+            </div>
+            <div id="proposal-section-cards" class="proposal-section-cards"></div>
+          </section>
+
+          <div class="proposal-context-alert">
+            <strong>Context-aware generation</strong>
+            <p>
+              Generate passes the active opportunity context, Section L/M requirements when extracted,
+              source evidence, and the selected team's past performance profile into the proposal draft.
+            </p>
+          </div>
+
+          <section class="proposal-output-panel">
+            <div class="proposal-output-header">
+              <div>
+                <h3>Output workspace</h3>
+                <p>Markdown-friendly draft for review, copy, or export.</p>
+              </div>
+              <div class="proposal-output-actions">
+                <button id="proposal-copy" class="secondary compact-button" type="button" disabled>Copy</button>
+                <button id="proposal-download" class="secondary compact-button" type="button" disabled>Export MD</button>
+              </div>
+            </div>
+            <div id="proposal-loading" class="proposal-loading" hidden>
+              <div class="proposal-spinner" aria-hidden="true"></div>
+              <strong>Architecting Compliant Narrative...</strong>
+              <div class="proposal-skeleton"></div>
+              <div class="proposal-skeleton wide"></div>
+              <div class="proposal-skeleton medium"></div>
+              <div class="proposal-skeleton block"></div>
+            </div>
+            <textarea
+              id="proposal-output"
+              spellcheck="true"
+              placeholder="Generated proposal draft will appear here. Edit the markdown before copying or exporting it."
+            ></textarea>
+            <div id="proposal-error" class="proposal-error" hidden></div>
+          </section>
+        </div>
+
+        <footer class="proposal-drawer-footer">
+          <p>Decision support only. Validate solicitation requirements, pricing, compliance, and source records before client delivery.</p>
+          <button id="proposal-generate" class="proposal-generate" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z" />
+            </svg>
+            Generate Draft
+          </button>
+        </footer>
+      </aside>
+    </div>
 
     <script src="./config.js"></script>
     <script src="./app.js" type="module"></script>

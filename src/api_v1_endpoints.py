@@ -156,6 +156,14 @@ class ReminderCreate(BaseModel):
     client_visible: bool = False
 
 
+class ProposalWriterRequest(BaseModel):
+    opportunity_id: str = Field(..., min_length=1, max_length=128)
+    opportunity_title: str = Field(..., min_length=2, max_length=500)
+    target_section: str = Field(..., pattern="^(Technical Approach|Management Plan|Past Performance|Quality Assurance)$")
+    rfp_requirements: Dict[str, Any] = Field(default_factory=dict)
+    company_past_performance: Dict[str, Any] = Field(default_factory=dict)
+
+
 class BillingCheckoutRequest(BaseModel):
     success_url: Optional[str] = None
     cancel_url: Optional[str] = None
@@ -324,6 +332,24 @@ def get_capture_brief_markdown(
         media_type="text/markdown; charset=utf-8",
         headers={"content-disposition": f"attachment; filename=capture-brief-{opportunity_id}.md"},
     )
+
+
+@router.post("/proposal-writer")
+def create_proposal_draft(
+    payload: ProposalWriterRequest,
+    request: Request,
+    conn=Depends(get_db_connection),
+) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    draft = _render_proposal_writer_markdown(payload, context)
+    return {
+        "draft": draft,
+        "target_section": payload.target_section,
+        "opportunity_id": payload.opportunity_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generation_mode": "deterministic_template",
+        "legal_disclaimer": _procurement_decision_disclaimer(),
+    }
 
 
 @router.get("/workspace")
@@ -3199,6 +3225,119 @@ def _record_audit_event(
                 "metadata": json.dumps(_json_safe(metadata)),
             },
         )
+
+
+def _render_proposal_writer_markdown(payload: ProposalWriterRequest, context: Mapping[str, Any]) -> str:
+    requirements = payload.rfp_requirements or {}
+    company_context = payload.company_past_performance or {}
+    opportunity = _as_mapping(requirements.get("opportunity"))
+    profile = _as_mapping(company_context.get("customer_profile"))
+    evidence = [_as_mapping(item) for item in _as_list(requirements.get("evidence"))]
+    past_performance = [_as_mapping(item) for item in _as_list(company_context.get("past_performance"))]
+
+    company_name = profile.get("company_name") or profile.get("tenant_name") or context.get("tenant_name") or "the client"
+    notice_id = opportunity.get("notice_id") or payload.opportunity_id
+    agency = opportunity.get("funding_agency_name") or "--"
+    naics_psc = f"{opportunity.get('naics_code') or '--'} / {opportunity.get('psc_code') or '--'}"
+    source_url = opportunity.get("ui_link") or opportunity.get("source_url") or "Source link pending"
+    first_evidence = evidence[0].get("explanation") if evidence else "the active solicitation context and source-backed capture evidence"
+    first_past_performance = past_performance[0].get("title") if past_performance else "verified client past performance"
+    narratives = {
+        "Technical Approach": (
+            f"{company_name} will deliver a disciplined technical approach that maps each work requirement to accountable "
+            "execution steps, measurable deliverables, and documented acceptance criteria. The team should validate requirements "
+            f"at kickoff, maintain a traceable compliance matrix, and use recurring reviews to keep performance aligned with {first_evidence}."
+        ),
+        "Management Plan": (
+            f"{company_name} will manage performance through a named program lead, clear escalation paths, recurring status reviews, "
+            "and risk tracking tied to schedule, quality, staffing, and customer acceptance. The management approach should reference "
+            f"{first_past_performance} where it supports staffing, transition, communication, or delivery credibility."
+        ),
+        "Past Performance": (
+            f"{company_name} should present past performance that is recent, relevant, and outcome-oriented. Lead with "
+            f"{first_past_performance}, then connect scope, agency environment, contract role, value, and measurable results to "
+            "the evaluation factors. Avoid unsupported claims and identify any relevance gaps the evaluator may question."
+        ),
+        "Quality Assurance": (
+            f"{company_name} will use a quality assurance process built around requirement traceability, peer review, inspection "
+            "checkpoints, corrective action tracking, and customer-visible reporting. The final response should tie each QA control "
+            "to the solicitation's acceptance criteria and the operational risks surfaced by the capture analysis."
+        ),
+    }
+
+    lines = [
+        f"# {payload.target_section}: {payload.opportunity_title}",
+        "",
+        "## Decision Support Notice",
+        PROCUREMENT_DECISION_DISCLAIMER,
+        "",
+        "## Source Context",
+        f"- Notice: {notice_id}",
+        f"- Agency: {agency}",
+        f"- NAICS/PSC: {naics_psc}",
+        f"- Source: {source_url}",
+        "",
+        "## Active Document Context",
+        f"- Section L: {requirements.get('section_l') or 'Extraction pending; validate instructions before client delivery.'}",
+        f"- Section M: {requirements.get('section_m') or 'Extraction pending; validate evaluation factors before client delivery.'}",
+        "",
+        f"## Draft {payload.target_section}",
+        narratives.get(payload.target_section, narratives["Technical Approach"]),
+        "",
+        "## Evidence To Weave In",
+    ]
+    lines.extend(_proposal_evidence_lines(evidence))
+    lines.extend(["", "## Past Performance Anchors"])
+    lines.extend(_proposal_past_performance_lines(past_performance))
+    lines.extend(
+        [
+            "",
+            "## Compliance Checks Before Use",
+            "- Confirm Section L instructions, page limits, file format, and required volumes.",
+            "- Confirm Section M evaluation factors and relative importance.",
+            "- Confirm all claims are supported by client evidence and source records.",
+            "- Confirm pricing, eligibility, representations, and submission compliance outside this drafting assistant.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _proposal_evidence_lines(evidence: Sequence[Mapping[str, Any]]) -> List[str]:
+    if not evidence:
+        return ["- Source-backed evidence pending; validate solicitation documents before finalizing."]
+    lines = []
+    for item in evidence[:8]:
+        label = item.get("source_title") or item.get("explanation") or item.get("source_record_id") or "Evidence record"
+        url = f" ({item.get('source_url')})" if item.get("source_url") else ""
+        lines.append(f"- {item.get('source_system') or 'Source'}: {label}{url}")
+    return lines
+
+
+def _proposal_past_performance_lines(rows: Sequence[Mapping[str, Any]]) -> List[str]:
+    if not rows:
+        return ["- Import client past performance before sending a client-ready proposal section."]
+    lines = []
+    for row in rows[:5]:
+        amount = row.get("obligated_amount")
+        amount_text = f" / {_format_money(amount)}" if amount is not None else ""
+        lines.append(f"- {row.get('title') or row.get('contract_number')}: {row.get('agency_name') or 'Agency pending'}{amount_text}")
+    return lines
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _as_list(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _format_money(value: Any) -> str:
+    try:
+        return f"${float(value):,.0f}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _render_capture_brief_markdown(analysis: Mapping[str, Any]) -> str:

@@ -71,7 +71,7 @@ resource "aws_scheduler_schedule" "sam_opportunities_enrichment" {
       dataset                   = "sam_opportunity_enrichment"
       mode                      = "enrich_sam_opportunity_embeddings"
       limit                     = var.sam_enrichment_batch_limit
-      fetch_documents           = true
+      fetch_documents           = var.sam_enrichment_fetch_documents
       documents_per_opportunity = 1
     })
 

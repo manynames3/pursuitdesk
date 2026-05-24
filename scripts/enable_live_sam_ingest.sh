@@ -10,6 +10,7 @@ SCHEDULE_EXPRESSION="${GSA_INGEST_SCHEDULE_EXPRESSION:-rate(6 hours)}"
 LOOKBACK_DAYS="${GSA_INGEST_LOOKBACK_DAYS:-1}"
 MAX_PAGES="${GSA_INGEST_MAX_PAGES:-2}"
 ENRICHMENT_BATCH_LIMIT="${SAM_ENRICHMENT_BATCH_LIMIT:-10}"
+ENRICHMENT_FETCH_DOCUMENTS="${SAM_ENRICHMENT_FETCH_DOCUMENTS:-false}"
 USASPENDING_MAX_PAGES="${USASPENDING_AWARDS_MAX_PAGES:-5}"
 BACKFILL_DAYS="${GSA_BACKFILL_DAYS:-30}"
 BACKFILL_MAX_PAGES="${GSA_BACKFILL_MAX_PAGES:-10}"
@@ -66,6 +67,7 @@ gsa_ingest_lookback_days = $LOOKBACK_DAYS
 gsa_ingest_max_pages = $MAX_PAGES
 enable_sam_enrichment_schedule = true
 sam_enrichment_batch_limit = $ENRICHMENT_BATCH_LIMIT
+sam_enrichment_fetch_documents = $ENRICHMENT_FETCH_DOCUMENTS
 enable_usaspending_awards_schedule = true
 usaspending_awards_max_pages = $USASPENDING_MAX_PAGES
 EOF
@@ -105,7 +107,7 @@ cat >/tmp/captureos-sam-enrichment-event.json <<EOF
   "dataset": "sam_opportunity_enrichment",
   "mode": "enrich_sam_opportunity_embeddings",
   "limit": $ENRICHMENT_BATCH_LIMIT,
-  "fetch_documents": true,
+  "fetch_documents": $ENRICHMENT_FETCH_DOCUMENTS,
   "documents_per_opportunity": 1
 }
 EOF

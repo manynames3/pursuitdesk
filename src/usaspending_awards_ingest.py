@@ -26,13 +26,6 @@ CONTRACT_AWARD_TYPE_CODES = [
     "B",
     "C",
     "D",
-    "IDV_A",
-    "IDV_B",
-    "IDV_B_A",
-    "IDV_B_B",
-    "IDV_B_C",
-    "IDV_C",
-    "IDV_D",
 ]
 AWARD_FIELDS = [
     "Award ID",
@@ -104,8 +97,9 @@ def upsert_usaspending_awards_event(event: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(records, list):
         raise USAspendingIngestError("records must be a list.")
     written = upsert_awards_to_database(records)
-    update_data_freshness(written)
-    return {"normalizedRecords": len(records), "writtenRecords": written}
+    live_count = count_live_usaspending_awards()
+    update_data_freshness(live_count)
+    return {"normalizedRecords": len(records), "writtenRecords": written, "liveAwardRecords": live_count}
 
 
 def _build_request_config(body: Mapping[str, Any]) -> Dict[str, Any]:
@@ -146,12 +140,17 @@ def upsert_awards_to_database(records: List[Mapping[str, Any]]) -> int:
     if not database_url:
         raise USAspendingIngestError("DATABASE_URL must be configured.")
 
-    entity_rows = []
-    award_rows = []
+    entity_by_key: Dict[str, Dict[str, Any]] = {}
+    award_by_key: Dict[str, Dict[str, Any]] = {}
     for raw in records:
         normalized = normalize_usaspending_award(raw)
-        entity_rows.append(normalized["entity"])
-        award_rows.append(normalized["award"])
+        entity = normalized["entity"]
+        award = normalized["award"]
+        entity_by_key[_entity_batch_key(entity["legal_name"])] = entity
+        award_by_key[award["contract_award_unique_key"]] = award
+
+    entity_rows = list(entity_by_key.values())
+    award_rows = list(award_by_key.values())
 
     with psycopg2.connect(database_url, connect_timeout=10) as conn:
         with conn.cursor() as cur:
@@ -262,7 +261,7 @@ def upsert_awards_to_database(records: List[Mapping[str, Any]]) -> int:
                 template="(%s,%s,%s,%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s,%s)",
                 page_size=100,
             )
-    return len(records)
+    return len(award_rows)
 
 
 def normalize_usaspending_award(raw: Mapping[str, Any]) -> Dict[str, Any]:
@@ -323,6 +322,11 @@ def normalize_usaspending_award(raw: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _entity_batch_key(name: str) -> str:
+    normalized = "".join(ch for ch in str(name).lower() if ch.isalnum())
+    return normalized or "unknown"
+
+
 def update_data_freshness(record_count: int) -> None:
     import psycopg2
 
@@ -349,13 +353,31 @@ def update_data_freshness(record_count: int) -> None:
                   last_successful_sync_at = EXCLUDED.last_successful_sync_at,
                   last_attempted_sync_at = EXCLUDED.last_attempted_sync_at,
                   sync_status = 'ready',
-                  record_count = capture.data_freshness.record_count + EXCLUDED.record_count,
+                  record_count = EXCLUDED.record_count,
                   source_url = EXCLUDED.source_url,
                   notes = EXCLUDED.notes,
                   updated_at = now();
                 """,
                 {"record_count": record_count, "source_url": DEFAULT_ENDPOINT},
             )
+
+
+def count_live_usaspending_awards() -> int:
+    import psycopg2
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return 0
+    with psycopg2.connect(database_url, connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*)::int
+                FROM capture.awards
+                WHERE source_payload->>'source_system' = 'USAspending';
+                """
+            )
+            return int(cur.fetchone()[0])
 
 
 def _invoke_upsert_lambda(function_name: str, rows: List[Mapping[str, Any]], config: Mapping[str, Any]) -> int:

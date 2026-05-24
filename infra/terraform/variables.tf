@@ -326,6 +326,12 @@ variable "sam_enrichment_batch_limit" {
   default     = 10
 }
 
+variable "sam_enrichment_fetch_documents" {
+  description = "Fetch SAM.gov document URLs during enrichment. Keep false for the no-NAT demo stack; metadata-only embeddings still run inside the VPC."
+  type        = bool
+  default     = false
+}
+
 variable "enable_usaspending_awards_schedule" {
   description = "Create a low-cost EventBridge Scheduler job for USAspending contract award ingest."
   type        = bool

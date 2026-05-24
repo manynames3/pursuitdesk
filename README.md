@@ -4,10 +4,10 @@ PursuitDesk is a public GovCon consulting delivery platform for small-business a
 
 Live demo:
 
-- Frontend: https://govcon-captureos.pages.dev/
+- Frontend: https://pursuitdesk.pages.dev/
 - Backend API: https://n2qx0wcyg8.execute-api.us-east-1.amazonaws.com
 
-The user-facing product is PursuitDesk. Infrastructure and repository names still use `govcon-captureos`.
+The user-facing product and GitHub repository are PursuitDesk. AWS resource names still use `govcon-captureos`.
 
 ## About
 
@@ -108,7 +108,7 @@ Frontend deploy:
 
 ```bash
 npx wrangler@4 pages deploy frontend \
-  --project-name govcon-captureos \
+  --project-name pursuitdesk \
   --branch main \
   --commit-hash "$(git rev-parse --short HEAD)" \
   --commit-dirty=true

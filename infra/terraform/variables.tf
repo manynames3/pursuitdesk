@@ -380,7 +380,7 @@ variable "stripe_price_id" {
 variable "app_public_url" {
   description = "Public frontend URL used for billing success/cancel redirects."
   type        = string
-  default     = "https://govcon-captureos.pages.dev"
+  default     = "https://pursuitdesk.pages.dev"
 }
 
 variable "enable_gsa_ingest_schedule" {

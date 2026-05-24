@@ -220,7 +220,7 @@ resource "aws_scheduler_schedule" "sam_opportunities_ingest" {
 
     retry_policy {
       maximum_event_age_in_seconds = 3600
-      maximum_retry_attempts       = 2
+      maximum_retry_attempts       = 0
     }
   }
 

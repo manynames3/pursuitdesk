@@ -2293,6 +2293,8 @@ def _procurement_decision_disclaimer() -> Dict[str, Any]:
 def _ingest_alerts(data_freshness: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     live_alerts = []
     import_backed_sources = []
+    has_failed_live_ingest = False
+    has_stale_live_ingest = False
     for row in data_freshness:
         source_mode = row.get("source_mode")
         freshness_state = row.get("freshness_state") or "unknown"
@@ -2308,16 +2310,31 @@ def _ingest_alerts(data_freshness: Sequence[Mapping[str, Any]]) -> Dict[str, Any
             "last_successful_sync_at": row.get("last_successful_sync_at"),
         }
         if source_mode == "live_api" and (freshness_state != "fresh" or sync_status not in {"ready", "syncing"}):
-            item["severity"] = "critical" if sync_status == "failed" else "warning"
-            item["message"] = "Live ingest is outside SLA or reporting a degraded status."
+            if sync_status == "failed":
+                has_failed_live_ingest = True
+                item["severity"] = "critical"
+                item["message"] = "Last live ingest attempt failed and needs review."
+            elif freshness_state != "fresh":
+                has_stale_live_ingest = True
+                item["severity"] = "warning"
+                item["message"] = "Last successful live sync is outside the freshness window."
+            else:
+                item["severity"] = "warning"
+                item["message"] = "Live ingest is reporting a degraded status."
             live_alerts.append(item)
         elif source_mode == "mock_seed":
             item["severity"] = "info"
             item["message"] = "Dataset uses an imported baseline until live sync is enabled."
             import_backed_sources.append(item)
+    if has_failed_live_ingest:
+        summary = "Live ingest failures require review."
+    elif has_stale_live_ingest:
+        summary = "Source freshness needs review."
+    else:
+        summary = "All live ingests are fresh and within SLA."
     return {
         "status": "attention" if live_alerts else "ok",
-        "summary": "Live ingest failures require review." if live_alerts else "All live ingests are fresh and within SLA.",
+        "summary": summary,
         "items": live_alerts + import_backed_sources,
         "live_alert_count": len(live_alerts),
         "import_backed_source_count": len(import_backed_sources),

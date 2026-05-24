@@ -425,6 +425,17 @@ def request_json_with_retry(
                 raise
             last_error = exc
             retry_after = _parse_retry_after(exc.headers.get("Retry-After"))
+            LOGGER.warning(
+                "SAM.gov transient HTTP %s for params=%s retry_after=%s body=%s",
+                exc.status_code,
+                _redacted(params),
+                exc.headers.get("Retry-After"),
+                _body_excerpt(exc.body),
+            )
+            if exc.status_code == 429 and retry_after is not None and retry_after > DEFAULT_MAX_BACKOFF_SECONDS:
+                raise RetryBudgetExceeded(
+                    f"SAM.gov quota throttle is active until {exc.headers.get('Retry-After')}; skipping retries."
+                ) from exc
         except (socket.timeout, TimeoutError, urllib.error.URLError) as exc:
             last_error = exc
             retry_after = None
@@ -1569,3 +1580,7 @@ def _lambda_time_available(context: Any, reserve_seconds: float) -> bool:
 
 def _redacted(params: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: ("***" if key == "api_key" else value) for key, value in params.items()}
+
+
+def _body_excerpt(body: str, limit: int = 300) -> str:
+    return re.sub(r"\s+", " ", body).strip()[:limit]

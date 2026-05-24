@@ -485,13 +485,14 @@ async function exportBrief() {
 
 async function exportClientReport() {
   const team = selectedTeam();
-  const fallback = () => downloadText(renderLocalClientReport(consultantWorkspace || buildFallbackWorkspace()), `govcon-client-report-${team.tenant_slug}.md`);
+  const filename = `${safeFilename(`pursuitdesk-client-report-${team.tenant_slug}`)}.pdf`;
+  const fallback = () => downloadBlob(createPdfBlob(renderLocalClientReport(consultantWorkspace || buildFallbackWorkspace())), filename);
   try {
     const response = await fetch(`${apiBaseUrl}/api/v1/consultant/client-report.md`, {
       headers: requestHeaders({ accept: "text/markdown" }),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    downloadText(await response.text(), `govcon-client-report-${team.tenant_slug}.md`);
+    downloadBlob(createPdfBlob(await response.text()), filename);
   } catch (error) {
     fallback();
   }

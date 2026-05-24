@@ -604,11 +604,30 @@ h3 {
   color: #166534;
 }
 
+.badge.ok,
+.badge.ready {
+  background: #dcfce7;
+  color: #166534;
+}
+
 .badge.stale,
 .badge.degraded,
-.badge.failed {
+.badge.failed,
+.badge.warning,
+.badge.attention,
+.badge.needs_review {
   background: #fef3c7;
   color: #92400e;
+}
+
+.badge.critical {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.badge.info {
+  background: #dbeafe;
+  color: #1d4ed8;
 }
 
 .badge.pursue {

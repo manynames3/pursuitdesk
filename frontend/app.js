@@ -100,7 +100,9 @@ const fallbackAnalysis = {
   },
   data_freshness: [
     { source_system: "SAM.gov", dataset_name: "Opportunities", source_mode: "live_api", freshness_state: "fresh", last_successful_sync_at: "2026-05-22T12:00:00Z", record_count: 981 },
-    { source_system: "FSRS", dataset_name: "Subaward Reporting", source_mode: "mock_seed", freshness_state: "fresh", last_successful_sync_at: "2026-05-22T12:00:00Z", record_count: 48 },
+    { source_system: "FSRS", dataset_name: "Subaward Reporting", source_mode: "live_api", freshness_state: "fresh", last_successful_sync_at: "2026-05-24T06:44:00Z", record_count: 488 },
+    { source_system: "GSA CALC+", dataset_name: "Labor Rate Benchmarks", source_mode: "live_api", freshness_state: "fresh", last_successful_sync_at: "2026-05-24T06:44:00Z", record_count: 646 },
+    { source_system: "USAspending", dataset_name: "Contract Awards", source_mode: "live_api", freshness_state: "fresh", last_successful_sync_at: "2026-05-24T06:44:00Z", record_count: 925 },
   ],
   past_performance: [
     { contract_number: "RAF-FA8773-24-F-0112", title: "Zero Trust Platform Engineering", role: "subcontractor", agency_name: "Department of the Air Force", obligated_amount: 18400000 },
@@ -162,6 +164,8 @@ const els = {
   brandColor: document.querySelector("#brand-color"),
   brandEmail: document.querySelector("#brand-email"),
   trustPosture: document.querySelector("#trust-posture"),
+  monitoringAlerts: document.querySelector("#monitoring-alerts"),
+  demoDataAudit: document.querySelector("#demo-data-audit"),
   opportunities: document.querySelector("#opportunities"),
   opportunityCount: document.querySelector("#opportunity-count"),
   opportunityRange: document.querySelector("#opportunity-range"),
@@ -531,6 +535,7 @@ function renderConsultantWorkspace(workspace) {
   const clients = workspace.clients || [];
   const positioning = workspace.positioning || {};
   const whiteLabel = workspace.white_label || {};
+  const disclaimer = workspace.legal_disclaimer || {};
 
   els.positioningHeadline.textContent = positioning.headline || "GovCon consulting delivery platform for small-business advisors";
   els.positioningPromise.textContent = positioning.promise || "Add a client, get readiness, get top pursuits, export a client report.";
@@ -655,20 +660,76 @@ function renderConsultantWorkspace(workspace) {
         <span>${numberFormat(trust.mock_source_count)} demo sources</span>
       </div>
       <div class="row-note">${escapeHtml(trust.disclaimer || "")}</div>
+      ${(disclaimer.limits || []).length ? `<div class="row-meta">${disclaimer.limits.slice(0, 2).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
     </div>
   `;
+  renderMonitoringAlerts(workspace.ingest_alerts || {});
+  renderDemoDataAudit(workspace.business_data_audit || {});
 }
 
 function renderDemoFlow(steps) {
   els.demoFlow.innerHTML = steps.length
-    ? steps.map((step) => `
+    ? steps.map((step, index) => `
         <div class="flow-step">
           <span class="badge ${escapeHtml(step.status || "open")}">${escapeHtml(step.status || "open")}</span>
-          <strong>${escapeHtml(step.step)}</strong>
+          <strong>${index + 1}. ${escapeHtml(step.step)}</strong>
           <small>${escapeHtml(step.description || "")}</small>
         </div>
       `).join("")
     : "";
+}
+
+function renderMonitoringAlerts(alerts) {
+  const items = alerts.items || [];
+  const liveItems = items.filter((item) => item.source_mode === "live_api" && item.severity !== "info");
+  els.monitoringAlerts.innerHTML = `
+    <div class="row compact">
+      <div class="row-title">
+        <strong>${escapeHtml(alerts.summary || "Ingest health pending")}</strong>
+        <span class="badge ${escapeHtml(alerts.status || "unknown")}">${escapeHtml(alerts.status || "unknown")}</span>
+      </div>
+      <div class="row-meta">
+        <span>${numberFormat(alerts.live_alert_count || 0)} live alerts</span>
+        <span>${numberFormat(alerts.demo_source_count || 0)} demo sources</span>
+      </div>
+    </div>
+    ${
+      liveItems.length
+        ? liveItems.slice(0, 4).map((item) => `
+            <div class="row compact">
+              <div class="row-title">
+                <strong>${escapeHtml(item.source_system)} · ${escapeHtml(item.dataset_name)}</strong>
+                <span class="badge ${escapeHtml(item.severity || "warning")}">${escapeHtml(item.freshness_state || item.sync_status || "alert")}</span>
+              </div>
+              <div class="row-meta">
+                <span>${escapeHtml(item.sync_status || "--")}</span>
+                <span>${numberFormat(item.record_count || 0)} rows</span>
+              </div>
+            </div>
+          `).join("")
+        : `<div class="row compact"><strong>No live ingest failures detected.</strong><div class="row-meta">SAM.gov, USAspending, FSRS, and GSA CALC+ freshness are monitored through source watermarks.</div></div>`
+    }
+  `;
+}
+
+function renderDemoDataAudit(audit) {
+  const items = audit.items || [];
+  els.demoDataAudit.innerHTML = items.length
+    ? items.slice(0, 5).map((item) => `
+        <div class="row compact">
+          <div class="row-title">
+            <strong>${escapeHtml(item.label)}</strong>
+            <span class="badge ${escapeHtml(item.status || "needs_review")}">${escapeHtml((item.status || "needs_review").replace("_", " "))}</span>
+          </div>
+          <div class="row-meta">
+            <span>${numberFormat(item.demo_count || 0)} demo</span>
+            <span>${numberFormat(item.production_count || 0)} production/imported</span>
+            <span>${numberFormat(item.record_count || 0)} total</span>
+          </div>
+          <div class="row-note">${escapeHtml(item.recommendation || "")}</div>
+        </div>
+      `).join("")
+    : `<div class="empty">No business data audit records available.</div>`;
 }
 
 function opportunityButton(item) {
@@ -941,6 +1002,7 @@ function renderEvidence(evidence) {
           </div>
           <div class="row-meta">
             <span>${escapeHtml(item.source_system)}</span>
+            <span>${escapeHtml(item.source_record_id || "record")}</span>
             <span>${formatDate(item.source_record_date)}</span>
             <span>${money(item.source_amount)}</span>
             <span>${escapeHtml(item.naics_code || "--")}/${escapeHtml(item.psc_code || "--")}</span>
@@ -1163,9 +1225,33 @@ function buildFallbackWorkspace() {
     trust_posture: {
       auth_mode: "demo_header_context",
       billing_status: "implementation_ready",
-      live_source_count: 1,
-      mock_source_count: 3,
-      disclaimer: "Decision support only; consultants remain responsible for legal, compliance, and proposal review.",
+      live_source_count: 4,
+      mock_source_count: 1,
+      disclaimer: "Decision support only. GovCon CaptureOS does not provide legal advice, procurement advice, bid/no-bid directives, or a guarantee of award.",
+    },
+    legal_disclaimer: {
+      title: "Procurement Decision Support Notice",
+      summary: "Decision support only. Consultants remain responsible for validating source records, client eligibility, pricing assumptions, conflicts, and proposal compliance.",
+      limits: [
+        "Validate every source link and solicitation requirement before advising a client.",
+        "Treat P-win, readiness, pricing, incumbent, and teaming signals as advisory analysis.",
+      ],
+    },
+    ingest_alerts: {
+      status: "ok",
+      summary: "All live ingests are fresh and within SLA.",
+      live_alert_count: 0,
+      demo_source_count: 1,
+      items: [],
+    },
+    business_data_audit: {
+      status: "needs_review",
+      summary: "Seeded/demo business records remain and are labeled for advisor review before paid onboarding.",
+      items: [
+        { label: "Client profiles", status: "needs_review", record_count: clients.length, demo_count: clients.length, production_count: 0, recommendation: "Confirm profiles with each client before paid onboarding." },
+        { label: "Past performance", status: "needs_review", record_count: 2, demo_count: 2, production_count: 0, recommendation: "Replace seeded past performance with signed client imports." },
+        { label: "Workflow examples", status: "needs_review", record_count: 2, demo_count: 2, production_count: 0, recommendation: "Recreate real pipeline decisions during onboarding." },
+      ],
     },
   };
 }
@@ -1275,8 +1361,13 @@ function renderLocalClientReport(workspace) {
   const client = workspace.active_client || {};
   const readiness = client.readiness || {};
   const profile = client.profile || {};
+  const disclaimer = workspace.legal_disclaimer || {};
+  const audit = workspace.business_data_audit || {};
   const lines = [
     `# GovCon Client Report: ${client.company_name || client.tenant_name || "Client"}`,
+    "",
+    "## Decision Support Notice",
+    disclaimer.summary || "Decision support only. Validate source records, eligibility, pricing, and proposal compliance before advising a client.",
     "",
     "## Readiness",
     `- Score: ${percent(readiness.score)}`,
@@ -1288,7 +1379,13 @@ function renderLocalClientReport(workspace) {
     ...(readiness.gaps || []).map((gap) => `- ${gap.label}: ${gap.evidence}`),
     "",
     "## Recommended opportunities",
-    ...(client.recommended_opportunities || []).slice(0, 5).map((opp) => `- ${opp.title}: ${(opp.recommended_action || {}).action || "watch"}`),
+    ...(client.recommended_opportunities || []).slice(0, 5).map((opp) => `- ${opp.title}: ${(opp.recommended_action || {}).action || "watch"}${opp.ui_link ? ` - ${opp.ui_link}` : ""}`),
+    "",
+    "## Source Drilldowns",
+    ...(workspace.data_freshness || fallbackAnalysis.data_freshness || []).map((row) => `- ${row.source_system} / ${row.dataset_name}: ${row.source_mode} / ${row.freshness_state || row.sync_status} / ${row.record_count || 0} rows${row.source_url ? ` - ${row.source_url}` : ""}`),
+    "",
+    "## Demo Data Audit",
+    ...((audit.items || []).map((item) => `- ${item.label}: ${item.status} (${item.demo_count || 0} demo of ${item.record_count || 0} records). ${item.recommendation || ""}`)),
     "",
   ];
   return lines.join("\n");

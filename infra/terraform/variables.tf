@@ -474,6 +474,18 @@ variable "enable_cloudwatch_alarms" {
   default     = false
 }
 
+variable "enable_ingest_failure_alarms" {
+  description = "Create focused CloudWatch alarms for scheduled ingest/upsert Lambda failures."
+  type        = bool
+  default     = false
+}
+
+variable "cloudwatch_alarm_actions" {
+  description = "Optional CloudWatch alarm action ARNs, such as an SNS topic ARN for email delivery."
+  type        = list(string)
+  default     = []
+}
+
 variable "api_cors_allowed_origins" {
   description = "Allowed browser origins for the HTTP API. Use the Cloudflare-hosted frontend origin in shared demos."
   type        = list(string)

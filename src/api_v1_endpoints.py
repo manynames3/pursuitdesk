@@ -42,6 +42,11 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_WEBHOOK_SECRET_ARN = os.getenv("STRIPE_WEBHOOK_SECRET_ARN", "")
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", "https://govcon-captureos.pages.dev")
+PROCUREMENT_DECISION_DISCLAIMER = (
+    "Decision support only. GovCon CaptureOS does not provide legal advice, procurement advice, bid/no-bid directives, "
+    "or a guarantee of award. Consultants remain responsible for validating source records, FAR/agency requirements, "
+    "client eligibility, pricing assumptions, conflicts, and proposal compliance before advising a client or submitting a response."
+)
 
 router = APIRouter(prefix="/api/v1", tags=["GovCon CaptureOS v1"])
 app = FastAPI(title="GovCon CaptureOS Presentation API", version="1.0.0")
@@ -326,11 +331,15 @@ def get_workspace_summary(request: Request, conn=Depends(get_db_connection)) -> 
     context = _load_request_context(conn, request)
     tenant_id = context.get("tenant_id")
     profile = _fetch_customer_profile(conn, tenant_id)
+    data_freshness = _fetch_data_freshness(conn)
     return {
         "security_context": context,
         "customer_teams": _fetch_customer_teams(conn),
         "customer_profile": profile,
-        "data_freshness": _fetch_data_freshness(conn),
+        "data_freshness": data_freshness,
+        "ingest_alerts": _ingest_alerts(data_freshness),
+        "business_data_audit": _business_data_audit(conn),
+        "legal_disclaimer": _procurement_decision_disclaimer(),
         "competitor_watchlist": _fetch_competitor_watchlist(conn, tenant_id),
         "pipeline": _fetch_pipeline_summary(conn, tenant_id),
         "past_performance": _fetch_past_performance(conn, tenant_id, limit=20),
@@ -406,6 +415,9 @@ def _consultant_workspace_payload(
         "demo_flow": _polished_demo_flow(active_client),
         "white_label": white_label,
         "trust_posture": _trust_posture(context, data_freshness, compliance),
+        "legal_disclaimer": _procurement_decision_disclaimer(),
+        "business_data_audit": _business_data_audit(conn),
+        "ingest_alerts": _ingest_alerts(data_freshness),
         "data_freshness": data_freshness,
         "compliance_controls": compliance,
     }
@@ -917,6 +929,12 @@ def get_health(conn=Depends(get_db_connection)) -> Dict[str, Any]:
         "auth_required": AUTH_REQUIRED,
         "vector_store": "pgvector",
     }
+
+
+@router.get("/ops/ingest-alerts")
+def get_ingest_alerts(request: Request, conn=Depends(get_db_connection)) -> Dict[str, Any]:
+    _load_request_context(conn, request)
+    return _ingest_alerts(_fetch_data_freshness(conn))
 
 
 @router.post("/onboarding/past-performance/import")
@@ -2211,7 +2229,126 @@ def _trust_posture(
         "billing_status": "configured" if any(row.get("control_key") == "billing.stripe" for row in compliance) else "implementation_ready",
         "live_source_count": len(live_sources),
         "mock_source_count": len(mock_sources),
-        "disclaimer": "Decision support only; consultants remain responsible for legal, compliance, and proposal review.",
+        "disclaimer": PROCUREMENT_DECISION_DISCLAIMER,
+    }
+
+
+def _procurement_decision_disclaimer() -> Dict[str, Any]:
+    return {
+        "title": "Procurement Decision Support Notice",
+        "summary": PROCUREMENT_DECISION_DISCLAIMER,
+        "limits": [
+            "Validate every source link, notice amendment, set-aside rule, and solicitation requirement before advising a client.",
+            "Treat P-win, readiness, pricing, incumbent, and teaming signals as advisory analysis, not procurement determinations.",
+            "Confirm client eligibility, representations/certifications, conflicts, pricing, and compliance obligations outside this tool.",
+        ],
+    }
+
+
+def _ingest_alerts(data_freshness: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    live_alerts = []
+    demo_sources = []
+    for row in data_freshness:
+        source_mode = row.get("source_mode")
+        freshness_state = row.get("freshness_state") or "unknown"
+        sync_status = row.get("sync_status") or "unknown"
+        item = {
+            "source_system": row.get("source_system"),
+            "dataset_name": row.get("dataset_name"),
+            "source_mode": source_mode,
+            "freshness_state": freshness_state,
+            "sync_status": sync_status,
+            "record_count": row.get("record_count"),
+            "source_url": row.get("source_url"),
+            "last_successful_sync_at": row.get("last_successful_sync_at"),
+        }
+        if source_mode == "live_api" and (freshness_state != "fresh" or sync_status not in {"ready", "syncing"}):
+            item["severity"] = "critical" if sync_status == "failed" else "warning"
+            item["message"] = "Live ingest is outside SLA or reporting a degraded status."
+            live_alerts.append(item)
+        elif source_mode == "mock_seed":
+            item["severity"] = "info"
+            item["message"] = "Dataset is still demo/import-backed, not live-ingested."
+            demo_sources.append(item)
+    return {
+        "status": "attention" if live_alerts else "ok",
+        "summary": "Live ingest failures require review." if live_alerts else "All live ingests are fresh and within SLA.",
+        "items": live_alerts + demo_sources,
+        "live_alert_count": len(live_alerts),
+        "demo_source_count": len(demo_sources),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _business_data_audit(conn) -> Dict[str, Any]:
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT 'Client profiles' AS label,
+                       count(*)::int AS record_count,
+                       count(*) FILTER (WHERE t.plan_tier = 'demo')::int AS demo_count,
+                       count(*) FILTER (WHERE t.plan_tier <> 'demo')::int AS production_count,
+                       'Profiles created under demo tenants need client attestation before paid onboarding.' AS recommendation
+                FROM capture.customer_profiles cp
+                JOIN capture.tenants t ON t.tenant_id = cp.tenant_id
+
+                UNION ALL
+
+                SELECT 'Past performance' AS label,
+                       count(*)::int AS record_count,
+                       count(*) FILTER (WHERE cpp.source_payload @> '{"mock_seed": true}'::jsonb)::int AS demo_count,
+                       count(*) FILTER (WHERE NOT (cpp.source_payload @> '{"mock_seed": true}'::jsonb))::int AS production_count,
+                       'Replace seeded past performance with signed client imports or verified contract history.' AS recommendation
+                FROM capture.customer_past_performance cpp
+
+                UNION ALL
+
+                SELECT 'Workflow examples' AS label,
+                       count(*)::int AS record_count,
+                       count(*) FILTER (WHERE t.plan_tier = 'demo')::int AS demo_count,
+                       count(*) FILTER (WHERE t.plan_tier <> 'demo')::int AS production_count,
+                       'Demo workflow rows are useful for sales; paid clients need their own pipeline decisions.' AS recommendation
+                FROM capture.capture_opportunity_workflow wf
+                JOIN capture.tenants t ON t.tenant_id = wf.tenant_id
+
+                UNION ALL
+
+                SELECT 'Client reminders' AS label,
+                       count(*)::int AS record_count,
+                       count(*) FILTER (WHERE cr.source_payload @> '{"mock_seed": true}'::jsonb OR t.plan_tier = 'demo')::int AS demo_count,
+                       count(*) FILTER (WHERE NOT (cr.source_payload @> '{"mock_seed": true}'::jsonb) AND t.plan_tier <> 'demo')::int AS production_count,
+                       'Demo reminders should be deleted or recreated by the advisor during real onboarding.' AS recommendation
+                FROM capture.consultant_reminders cr
+                JOIN capture.tenants t ON t.tenant_id = cr.tenant_id
+
+                UNION ALL
+
+                SELECT 'Billing records' AS label,
+                       count(*)::int AS record_count,
+                       count(*) FILTER (WHERE ba.source_payload @> '{"mock_seed": true}'::jsonb OR ba.provider_customer_id ILIKE 'cus_demo%')::int AS demo_count,
+                       count(*) FILTER (WHERE NOT (ba.source_payload @> '{"mock_seed": true}'::jsonb) AND ba.provider_customer_id NOT ILIKE 'cus_demo%')::int AS production_count,
+                       'Demo billing records must be replaced by live Stripe subscriptions before charging customers.' AS recommendation
+                FROM capture.billing_accounts ba;
+                """
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            rows = []
+        else:
+            raise
+
+    items = []
+    for row in rows:
+        item = _json_safe(dict(row))
+        item["status"] = "needs_review" if int(item.get("demo_count") or 0) else "ready"
+        items.append(item)
+    return {
+        "status": "needs_review" if any(item["status"] == "needs_review" for item in items) else "ready",
+        "items": items,
+        "summary": "Seeded/demo business records remain and are labeled for advisor review before paid onboarding.",
     }
 
 
@@ -3073,6 +3210,9 @@ def _render_capture_brief_markdown(analysis: Mapping[str, Any]) -> str:
     lines = [
         f"# Capture Brief: {opportunity.get('title', 'Opportunity')}",
         "",
+        "## Decision Support Notice",
+        PROCUREMENT_DECISION_DISCLAIMER,
+        "",
         f"- Notice: {opportunity.get('notice_id', '--')}",
         f"- Agency: {opportunity.get('funding_agency_name', '--')}",
         f"- NAICS/PSC: {opportunity.get('naics_code', '--')} / {opportunity.get('psc_code', '--')}",
@@ -3113,10 +3253,16 @@ def _render_client_report_markdown(workspace: Mapping[str, Any]) -> str:
     profile = client.get("profile", {})
     trust = workspace.get("trust_posture", {})
     brand = workspace.get("white_label", {})
+    disclaimer = workspace.get("legal_disclaimer", {})
+    data_freshness = workspace.get("data_freshness", [])
+    business_audit = workspace.get("business_data_audit", {})
     lines = [
         f"# GovCon Client Report: {client.get('company_name') or client.get('tenant_name') or 'Client'}",
         "",
         f"Prepared by: {brand.get('organization_name', 'GovCon Advisory Practice')}",
+        "",
+        "## Decision Support Notice",
+        disclaimer.get("summary") or PROCUREMENT_DECISION_DISCLAIMER,
         "",
         "## Readiness",
         f"- Score: {readiness.get('score', '--')}",
@@ -3135,9 +3281,10 @@ def _render_client_report_markdown(workspace: Mapping[str, Any]) -> str:
     lines.extend(["", "## Recommended Opportunities"])
     for opp in client.get("recommended_opportunities", [])[:10]:
         action = opp.get("recommended_action", {})
+        source = f" Source: {opp.get('ui_link')}" if opp.get("ui_link") else ""
         lines.append(
             f"- {opp.get('title')} ({opp.get('notice_id')}): "
-            f"{str(action.get('action', 'watch')).upper()} - {action.get('rationale', '')}"
+            f"{str(action.get('action', 'watch')).upper()} - {action.get('rationale', '')}{source}"
         )
     lines.extend(["", "## Incumbents And Recompetes"])
     for signal in client.get("recompete_signals", [])[:10]:
@@ -3154,6 +3301,22 @@ def _render_client_report_markdown(workspace: Mapping[str, Any]) -> str:
     lines.extend(["", "## Consultant Deliverables"])
     for deliverable in workspace.get("deliverables", []):
         lines.append(f"- {deliverable.get('name')}: {deliverable.get('status')} - {deliverable.get('description')}")
+    lines.extend(["", "## Source Drilldowns"])
+    for row in data_freshness:
+        url = row.get("source_url") or ""
+        suffix = f" - {url}" if url else ""
+        lines.append(
+            f"- {row.get('source_system')} / {row.get('dataset_name')}: "
+            f"{row.get('source_mode')} / {row.get('freshness_state', row.get('sync_status'))} / "
+            f"{row.get('record_count', 0)} rows{suffix}"
+        )
+    lines.extend(["", "## Demo Data Audit"])
+    for item in business_audit.get("items", []):
+        lines.append(
+            f"- {item.get('label')}: {item.get('status')} "
+            f"({item.get('demo_count', 0)} demo of {item.get('record_count', 0)} records). "
+            f"{item.get('recommendation', '')}"
+        )
     lines.extend(
         [
             "",

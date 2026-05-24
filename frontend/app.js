@@ -462,13 +462,14 @@ async function updateWorkflow(goNoGo) {
 
 async function exportBrief() {
   if (!currentOpportunityId) return;
-  const fallback = () => downloadText(renderLocalBrief(currentAnalysis || buildFallbackAnalysis()), `capture-brief-${currentOpportunityId}.md`);
+  const filename = `${safeFilename(`capture-brief-${currentOpportunityId}`)}.pdf`;
+  const fallback = () => downloadBlob(createPdfBlob(renderLocalBrief(currentAnalysis || buildFallbackAnalysis())), filename);
   try {
     const response = await fetch(`${apiBaseUrl}/api/v1/capture-analysis/${encodeURIComponent(currentOpportunityId)}/brief.md`, {
       headers: requestHeaders({ accept: "text/markdown" }),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    downloadText(await response.text(), `capture-brief-${currentOpportunityId}.md`);
+    downloadBlob(createPdfBlob(await response.text()), filename);
   } catch (error) {
     fallback();
   }

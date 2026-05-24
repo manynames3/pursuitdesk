@@ -857,11 +857,12 @@ function renderLocalProposalDraft(payload) {
     "## Decision Support Notice",
     "Decision support only. Validate solicitation instructions, evaluation factors, pricing, representations, and compliance requirements before client delivery.",
     "",
-    "## Source Context",
+    "## Source Context And Citations",
     `- Notice: ${opportunity.notice_id || payload.opportunity_id}`,
     `- Agency: ${opportunity.funding_agency_name || "--"}`,
     `- NAICS/PSC: ${opportunity.naics_code || "--"} / ${opportunity.psc_code || "--"}`,
     `- Source: ${opportunity.ui_link || "Source link pending"}`,
+    `- Citation format: [Source: SAM.gov ${opportunity.notice_id || payload.opportunity_id}] and [Source: client past performance contract number]`,
     "",
     "## Active Document Context",
     `- Section L: ${payload.rfp_requirements.section_l || "Extraction pending; validate instructions before client delivery."}`,
@@ -871,18 +872,30 @@ function renderLocalProposalDraft(payload) {
     proposalSectionNarrative(payload.target_section, profile, evidence, pastPerformance),
     "",
     "## Evidence To Weave In",
-    ...(evidence.length ? evidence.slice(0, 6).map((item) => `- ${item.source_system || "Source"}: ${item.source_title || item.explanation || "Evidence record"}${item.source_url ? ` (${item.source_url})` : ""}`) : ["- Source-backed evidence pending; validate solicitation documents before finalizing."]),
+    ...(evidence.length ? evidence.slice(0, 6).map(localProposalEvidenceLine) : ["- Source-backed evidence pending; validate solicitation documents before finalizing."]),
     "",
     "## Past Performance Anchors",
-    ...(pastPerformance.length ? pastPerformance.slice(0, 4).map((item) => `- ${item.title || item.contract_number}: ${item.agency_name || "Agency pending"} · ${money(item.obligated_amount)}`) : ["- Import client past performance before sending a client-ready proposal section."]),
+    ...(pastPerformance.length ? pastPerformance.slice(0, 4).map(localProposalPastPerformanceLine) : ["- Import client past performance before sending a client-ready proposal section."]),
     "",
     "## Compliance Checks Before Use",
     "- Confirm Section L instructions and page/format limits.",
     "- Confirm Section M evaluation factors and relative importance.",
-    "- Confirm all claims are supported by client evidence.",
+    "- Confirm all claims are supported by client evidence, source records, and citation notes.",
     "- Confirm pricing, eligibility, and representations outside this drafting assistant.",
     "",
   ].join("\n");
+}
+
+function localProposalEvidenceLine(item) {
+  const record = item.source_record_id ? ` ${item.source_record_id}` : "";
+  const url = item.source_url ? ` (${item.source_url})` : "";
+  return `- [Source: ${item.source_system || "Source"}${record}] ${item.source_title || item.explanation || "Evidence record"}${url}`;
+}
+
+function localProposalPastPerformanceLine(item) {
+  const source = item.contract_number || item.past_performance_id || "record pending";
+  const title = item.title || item.contract_number || "Past performance record";
+  return `- [Source: client past performance ${source}] ${title}: ${item.agency_name || "Agency pending"} / ${item.naics_code || "--"}/${item.psc_code || "--"} / role ${item.role || "role pending"} / ${money(item.obligated_amount)}`;
 }
 
 function proposalSectionNarrative(targetSection, profile, evidence, pastPerformance) {
@@ -1980,13 +1993,25 @@ function renderLocalClientReport(workspace) {
     ...(readiness.gaps || []).map((gap) => `- ${gap.label}: ${gap.evidence}`),
     "",
     "## Recommended opportunities",
-    ...(client.recommended_opportunities || []).slice(0, 5).map((opp) => `- ${opp.title}: ${(opp.recommended_action || {}).action || "watch"}${opp.ui_link ? ` - ${opp.ui_link}` : ""}`),
+    ...(client.recommended_opportunities || []).slice(0, 5).map(reportOpportunityLine),
     "",
     "## Source Drilldowns",
     ...(workspace.data_freshness || fallbackAnalysis.data_freshness || []).map((row) => `- ${row.source_system} / ${row.dataset_name}: ${formatSourceMode(row.source_mode)} / ${row.freshness_state || row.sync_status} / ${row.record_count || 0} rows${row.source_url ? ` - ${row.source_url}` : ""}`),
     "",
   ];
   return lines.join("\n");
+}
+
+function reportOpportunityLine(opp) {
+  const action = opp.recommended_action || {};
+  const sourceUrl = opp.ui_link || opp.description_url;
+  const fitContext = [
+    opp.funding_agency_name || "Agency pending",
+    `${opp.naics_code || "--"}/${opp.psc_code || "--"}`,
+    `${percent(opp.dashboard_relevance_score)} profile fit`,
+  ].join("; ");
+  const source = sourceUrl ? ` Source: ${sourceUrl}` : " Source: source link pending";
+  return `- ${opp.title || "Opportunity"}: ${titleCase(action.action || "watch")} | ${fitContext}. Rationale: ${action.rationale || "Review source details and client capacity."}${source}`;
 }
 
 function createDocxBlob(markdown) {

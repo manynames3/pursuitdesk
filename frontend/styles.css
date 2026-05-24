@@ -589,6 +589,12 @@ button.decision-clear[hidden] {
   text-transform: uppercase;
 }
 
+.help-label {
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
 .metric-grid strong {
   font-size: 1.1rem;
 }

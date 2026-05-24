@@ -479,6 +479,7 @@ def _fetch_past_performance_by_tenant(conn, tenant_ids: Sequence[str], limit: in
                   SELECT
                     tenant_id::text,
                     past_performance_id::text,
+                    source,
                     contract_number,
                     role,
                     prime_name,
@@ -1600,6 +1601,7 @@ def _fetch_past_performance(conn, tenant_id: Optional[str], limit: int) -> List[
                 """
                 SELECT
                   past_performance_id::text,
+                  source,
                   contract_number,
                   role,
                   prime_name,
@@ -3429,23 +3431,26 @@ def _run_bedrock_call_with_deadline(callable_obj, seconds: float) -> Dict[str, A
 def _proposal_writer_system_prompt() -> str:
     return (
         "You are PursuitDesk Proposal Writer for government-contracting consultants. "
-        "Write polished, source-grounded proposal narrative in Markdown. "
+        "Write polished, source-grounded proposal narrative in Markdown with citation-ready source notes. "
         "Do not claim legal advice, bid/no-bid authority, guaranteed award, certifications, clearances, or past performance that is not in the provided context. "
-        "Mark assumptions clearly. Include a compliance checklist. Return only Markdown."
+        "Tie every material claim to provided opportunity evidence, Section L/M requirements, customer profile facts, or imported past performance. "
+        "Mark assumptions clearly, label missing source documents as pending validation, include a compliance checklist, and return only Markdown."
     )
 
 
 def _proposal_helper_system_prompt() -> str:
     return (
         "You prepare concise GovCon proposal context for a downstream drafting model. "
-        "Use only the provided context, keep missing items labeled as pending validation, and return tight Markdown bullets."
+        "Use only the provided context, keep missing items labeled as pending validation, preserve source IDs/URLs when available, and return tight Markdown bullets."
     )
 
 
 def _proposal_section_extraction_prompt(payload: ProposalWriterRequest) -> str:
     return (
         "Extract proposal-critical Section L/M signals for the target section. "
-        "Return bullets for instructions, evaluation factors, required proof, risks, and missing source documents.\n\n"
+        "Return bullets grouped as Section L Instructions, Section M Evaluation Criteria, Required Proof, Citation Hooks, Risks, and Missing Source Documents. "
+        "For each extracted signal, cite the provided source system, record ID, or URL when available. "
+        "Do not infer page limits, factors, certifications, or submission rules that are not present in context.\n\n"
         f"Target section: {payload.target_section}\n"
         f"Context JSON:\n{_proposal_context_json(payload, max_chars=18000)}"
     )
@@ -3454,7 +3459,9 @@ def _proposal_section_extraction_prompt(payload: ProposalWriterRequest) -> str:
 def _proposal_evidence_summary_prompt(payload: ProposalWriterRequest) -> str:
     return (
         "Summarize the opportunity, source-backed evidence, and customer fit for proposal drafting. "
-        "Return bullets grouped as Opportunity, Evidence, Customer Fit, Past Performance, and Assumptions.\n\n"
+        "Return bullets grouped as Opportunity, Evidence, Customer Fit, Past Performance Mapping, Citation Notes, and Assumptions. "
+        "Map past performance to the active agency, NAICS, PSC, scope, role, value, and likely evaluation factor. "
+        "Name gaps where source documents, SOW/PWS text, or evaluator criteria remain pending.\n\n"
         f"Target section: {payload.target_section}\n"
         f"Context JSON:\n{_proposal_context_json(payload, max_chars=18000)}"
     )
@@ -3472,12 +3479,18 @@ def _proposal_writer_prompt(
         "Required output structure:\n"
         f"# {payload.target_section}: {payload.opportunity_title}\n"
         "## Decision Support Notice\n"
-        "## Source Context\n"
+        "## Source Context And Citations\n"
         f"## Draft {payload.target_section}\n"
         "## Evidence To Weave In\n"
         "## Past Performance Anchors\n"
         "## Assumptions To Validate\n"
         "## Compliance Checklist\n\n"
+        "Drafting rules:\n"
+        "- Use citation notes such as [Source: SAM.gov NOTICE_ID] or [Source: client past performance CONTRACT_NUMBER] for material facts.\n"
+        "- Separate confirmed Section L instructions from inferred response strategy.\n"
+        "- Separate confirmed Section M evaluation criteria from advisory win themes.\n"
+        "- Map each past performance anchor to a concrete agency, NAICS, PSC, scope, role, value, or evaluation factor match when available.\n"
+        "- Do not invent document text, page limits, certifications, key personnel, clearances, ratings, or client results.\n\n"
         "Decision support notice text to include exactly or near-exactly:\n"
         f"{PROCUREMENT_DECISION_DISCLAIMER}\n\n"
         f"Tenant/customer context: {context.get('tenant_name') or context.get('tenant_slug') or 'unknown'}\n\n"
@@ -3502,17 +3515,20 @@ def _proposal_context_json(payload: ProposalWriterRequest, max_chars: int) -> st
             for key in (
                 "opportunity_id",
                 "notice_id",
+                "solicitation_number",
                 "title",
                 "funding_agency_name",
                 "funding_agency_code",
                 "naics_code",
                 "psc_code",
+                "set_aside_code",
                 "set_aside_description",
                 "response_deadline",
                 "estimated_value_min",
                 "estimated_value_max",
                 "ui_link",
                 "description_url",
+                "source_updated_at",
             )
         },
         "section_l": requirements.get("section_l"),
@@ -3556,6 +3572,7 @@ def _compact_evidence_item(value: Any) -> Dict[str, Any]:
         "naics": item.get("naics_code"),
         "psc": item.get("psc_code"),
         "explanation": item.get("explanation"),
+        "confidence": item.get("confidence"),
     }
 
 
@@ -3564,11 +3581,19 @@ def _compact_past_performance_item(value: Any) -> Dict[str, Any]:
     return {
         "contract_number": item.get("contract_number"),
         "title": item.get("title"),
+        "source": item.get("source"),
         "role": item.get("role"),
+        "prime_name": item.get("prime_name"),
         "agency": item.get("agency_name"),
+        "agency_code": item.get("agency_code"),
         "naics": item.get("naics_code"),
         "psc": item.get("psc_code"),
         "amount": item.get("obligated_amount"),
+        "start_date": item.get("start_date"),
+        "end_date": item.get("end_date"),
+        "contract_vehicles": item.get("contract_vehicles"),
+        "clearance_required": item.get("clearance_required"),
+        "customer_rating": item.get("customer_rating"),
         "description": str(item.get("description") or "")[:900],
     }
 
@@ -3580,6 +3605,7 @@ def _deterministic_section_context(payload: ProposalWriterRequest) -> str:
             "- Section L: " + str(requirements.get("section_l") or "Extraction pending; validate solicitation instructions before client delivery."),
             "- Section M: " + str(requirements.get("section_m") or "Extraction pending; validate evaluation factors before client delivery."),
             f"- Target section: {payload.target_section}.",
+            "- Citation rule: cite available source system, notice ID, source URL, or client past-performance contract number for material facts.",
         ]
     )
 
@@ -3592,6 +3618,7 @@ def _deterministic_evidence_summary(payload: ProposalWriterRequest) -> str:
         f"- Opportunity: {opportunity.get('title') or payload.opportunity_title}.",
         f"- Agency: {opportunity.get('funding_agency_name') or '--'}.",
         f"- NAICS/PSC: {opportunity.get('naics_code') or '--'} / {opportunity.get('psc_code') or '--'}.",
+        f"- Source: {opportunity.get('ui_link') or opportunity.get('description_url') or 'Source link pending'}.",
     ]
     lines.extend(_proposal_evidence_lines(evidence[:5]))
     return "\n".join(lines)
@@ -3620,7 +3647,9 @@ def _proposal_past_performance_match_summary(payload: ProposalWriterRequest) -> 
     ranked = sorted(rows, key=score, reverse=True)[:5]
     return "\n".join(
         f"- {row.get('title') or row.get('contract_number')}: deterministic relevance {score(row):.0%}; "
-        f"{row.get('agency_name') or 'Agency pending'}; {row.get('naics_code') or '--'}/{row.get('psc_code') or '--'}; {_format_money(row.get('obligated_amount'))}."
+        f"{row.get('agency_name') or 'Agency pending'}; {row.get('naics_code') or '--'}/{row.get('psc_code') or '--'}; "
+        f"{_format_money(row.get('obligated_amount'))}; role {row.get('role') or 'role pending'}; "
+        f"cite as client past performance {row.get('contract_number') or row.get('past_performance_id') or 'record pending'}."
         for row in ranked
     )
 
@@ -3684,11 +3713,12 @@ def _render_proposal_writer_markdown(payload: ProposalWriterRequest, context: Ma
         "## Decision Support Notice",
         PROCUREMENT_DECISION_DISCLAIMER,
         "",
-        "## Source Context",
+        "## Source Context And Citations",
         f"- Notice: {notice_id}",
         f"- Agency: {agency}",
         f"- NAICS/PSC: {naics_psc}",
         f"- Source: {source_url}",
+        f"- Citation format: [Source: SAM.gov {notice_id}] and [Source: client past performance contract number]",
         "",
         "## Active Document Context",
         f"- Section L: {requirements.get('section_l') or 'Extraction pending; validate instructions before client delivery.'}",
@@ -3708,7 +3738,7 @@ def _render_proposal_writer_markdown(payload: ProposalWriterRequest, context: Ma
             "## Compliance Checks Before Use",
             "- Confirm Section L instructions, page limits, file format, and required volumes.",
             "- Confirm Section M evaluation factors and relative importance.",
-            "- Confirm all claims are supported by client evidence and source records.",
+            "- Confirm all claims are supported by client evidence, source records, and citation notes.",
             "- Confirm pricing, eligibility, representations, and submission compliance outside this drafting assistant.",
             "",
         ]
@@ -3723,7 +3753,8 @@ def _proposal_evidence_lines(evidence: Sequence[Mapping[str, Any]]) -> List[str]
     for item in evidence[:8]:
         label = item.get("source_title") or item.get("explanation") or item.get("source_record_id") or "Evidence record"
         url = f" ({item.get('source_url')})" if item.get("source_url") else ""
-        lines.append(f"- {item.get('source_system') or 'Source'}: {label}{url}")
+        record = f" {item.get('source_record_id')}" if item.get("source_record_id") else ""
+        lines.append(f"- [Source: {item.get('source_system') or 'Source'}{record}] {label}{url}")
     return lines
 
 
@@ -3734,7 +3765,13 @@ def _proposal_past_performance_lines(rows: Sequence[Mapping[str, Any]]) -> List[
     for row in rows[:5]:
         amount = row.get("obligated_amount")
         amount_text = f" / {_format_money(amount)}" if amount is not None else ""
-        lines.append(f"- {row.get('title') or row.get('contract_number')}: {row.get('agency_name') or 'Agency pending'}{amount_text}")
+        fit = f"{row.get('naics_code') or '--'}/{row.get('psc_code') or '--'}"
+        source = row.get("contract_number") or row.get("past_performance_id") or "record pending"
+        title = row.get("title") or row.get("contract_number") or "Past performance record"
+        lines.append(
+            f"- [Source: client past performance {source}] {title}: "
+            f"{row.get('agency_name') or 'Agency pending'} / {fit} / role {row.get('role') or 'role pending'}{amount_text}"
+        )
     return lines
 
 
@@ -3747,10 +3784,19 @@ def _as_list(value: Any) -> List[Any]:
 
 
 def _format_money(value: Any) -> str:
+    if value is None or value == "":
+        return "--"
     try:
         return f"${float(value):,.0f}"
     except (TypeError, ValueError):
         return str(value)
+
+
+def _format_percent(value: Any) -> str:
+    try:
+        return f"{round(float(value) * 100)}%"
+    except (TypeError, ValueError):
+        return "--"
 
 
 def _render_capture_brief_markdown(analysis: Mapping[str, Any]) -> str:
@@ -3794,7 +3840,12 @@ def _render_capture_brief_markdown(analysis: Mapping[str, Any]) -> str:
     for item in analysis.get("evidence", {}).get("items", [])[:20]:
         url = item.get("source_url") or ""
         suffix = f" ({url})" if url else ""
-        lines.append(f"- [{item.get('source_system')}] {item.get('source_title')}{suffix}")
+        amount = f" / {_format_money(item.get('source_amount'))}" if item.get("source_amount") is not None else ""
+        lines.append(
+            f"- [{item.get('source_system')} {item.get('source_record_id') or 'record pending'}] "
+            f"{item.get('source_title') or 'Evidence record'}{suffix} / {item.get('source_record_date', 'date pending')}{amount} - "
+            f"{item.get('explanation', 'Source evidence')}"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -3831,12 +3882,7 @@ def _render_client_report_markdown(workspace: Mapping[str, Any]) -> str:
         lines.append(f"- {step}")
     lines.extend(["", "## Recommended Opportunities"])
     for opp in client.get("recommended_opportunities", [])[:10]:
-        action = opp.get("recommended_action", {})
-        source = f" Source: {opp.get('ui_link')}" if opp.get("ui_link") else ""
-        lines.append(
-            f"- {opp.get('title')} ({opp.get('notice_id')}): "
-            f"{str(action.get('action', 'watch')).upper()} - {action.get('rationale', '')}{source}"
-        )
+        lines.append(_render_report_opportunity_line(opp))
     lines.extend(["", "## Incumbents And Recompetes"])
     for signal in client.get("recompete_signals", [])[:10]:
         lines.append(
@@ -3874,6 +3920,20 @@ def _render_client_report_markdown(workspace: Mapping[str, Any]) -> str:
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def _render_report_opportunity_line(opp: Mapping[str, Any]) -> str:
+    action = _as_mapping(opp.get("recommended_action"))
+    action_label = str(action.get("action") or "watch").replace("_", " ").title()
+    source = opp.get("ui_link") or opp.get("description_url") or "source link pending"
+    return (
+        f"- {opp.get('title') or 'Opportunity'} ({opp.get('notice_id') or opp.get('opportunity_id') or 'notice pending'}): "
+        f"{action_label} | {opp.get('funding_agency_name') or 'Agency pending'}; "
+        f"{opp.get('naics_code') or '--'}/{opp.get('psc_code') or '--'}; "
+        f"{_format_percent(opp.get('dashboard_relevance_score'))} profile fit. "
+        f"Rationale: {action.get('rationale') or 'Review source details and client capacity.'} "
+        f"Source: {source}"
+    )
 
 
 def _display_source_mode(mode: Any) -> str:

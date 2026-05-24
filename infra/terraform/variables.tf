@@ -100,9 +100,13 @@ variable "lambda_functions" {
       timeout      = 30
       vpc_enabled  = false
       environment = {
-        AWS_USE_DUALSTACK_ENDPOINT      = "false"
-        LOG_LEVEL                       = "INFO"
-        PROPOSAL_HELPER_TIMEOUT_SECONDS = "10"
+        AWS_USE_DUALSTACK_ENDPOINT             = "false"
+        LOG_LEVEL                              = "INFO"
+        PROPOSAL_FALLBACK_MAX_TOKENS           = "1400"
+        PROPOSAL_FALLBACK_READ_TIMEOUT_SECONDS = "6"
+        PROPOSAL_HELPER_TIMEOUT_SECONDS        = "4"
+        PROPOSAL_WRITER_MAX_TOKENS             = "900"
+        PROPOSAL_WRITER_READ_TIMEOUT_SECONDS   = "10"
       }
     }
 

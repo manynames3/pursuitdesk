@@ -3353,24 +3353,49 @@ def _invoke_bedrock_text(
         config=Config(
             connect_timeout=2,
             read_timeout=read_timeout_seconds,
-            retries={"max_attempts": 2},
+            retries={"max_attempts": 1},
         ),
     )
-    response = client.converse(
-        modelId=model_id,
-        system=[{"text": system_prompt}],
-        messages=[{"role": "user", "content": [{"text": user_prompt}]}],
-        inferenceConfig={
-            "maxTokens": max_tokens,
-            "temperature": temperature,
-            "topP": 0.9,
-        },
-    )
+    def converse() -> Dict[str, Any]:
+        return client.converse(
+            modelId=model_id,
+            system=[{"text": system_prompt}],
+            messages=[{"role": "user", "content": [{"text": user_prompt}]}],
+            inferenceConfig={
+                "maxTokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
+
+    response = _run_bedrock_call_with_deadline(converse, read_timeout_seconds)
     parts = response.get("output", {}).get("message", {}).get("content", [])
     text = "\n".join(str(part.get("text", "")) for part in parts if part.get("text"))
     if not text.strip():
         raise RuntimeError("Bedrock returned an empty proposal response.")
     return text.strip(), _json_safe(response.get("usage") or {})
+
+
+def _run_bedrock_call_with_deadline(callable_obj, seconds: float) -> Dict[str, Any]:
+    if threading.current_thread() is not threading.main_thread() or seconds <= 0:
+        return callable_obj()
+
+    result: List[Dict[str, Any]] = []
+    errors: List[BaseException] = []
+
+    def target():
+        try:
+            result.append(callable_obj())
+        except BaseException as exc:  # pragma: no cover - preserves SDK exception type across thread boundary.
+            errors.append(exc)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    if thread.is_alive():
+        raise TimeoutError(f"Bedrock call exceeded {seconds:.1f}s deadline.")
+    if errors:
+        raise errors[0]
+    return result[0]
 
 
 def _proposal_writer_system_prompt() -> str:

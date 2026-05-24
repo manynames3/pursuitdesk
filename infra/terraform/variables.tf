@@ -297,7 +297,7 @@ variable "proposal_fallback_model_id" {
 variable "proposal_job_ttl_seconds" {
   description = "Seconds before Proposal Writer async job records expire from DynamoDB."
   type        = number
-  default     = 86400
+  default     = 2592000
 }
 
 variable "sam_embedding_provider" {

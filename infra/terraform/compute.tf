@@ -131,9 +131,13 @@ resource "aws_iam_role_policy" "lambda_runtime" {
         Action = [
           "dynamodb:GetItem",
           "dynamodb:PutItem",
+          "dynamodb:Query",
           "dynamodb:UpdateItem"
         ]
-        Resource = aws_dynamodb_table.proposal_writer_jobs.arn
+        Resource = [
+          aws_dynamodb_table.proposal_writer_jobs.arn,
+          "${aws_dynamodb_table.proposal_writer_jobs.arn}/index/*"
+        ]
       }
       ],
       length(compact([var.sam_api_key_secret_arn, var.stripe_api_key_secret_arn, var.stripe_webhook_secret_arn])) > 0 ? [

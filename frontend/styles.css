@@ -1004,6 +1004,56 @@ tr:last-child td {
   text-decoration: underline;
 }
 
+.proposal-history {
+  display: grid;
+  gap: 10px;
+}
+
+.proposal-job {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: white;
+}
+
+.proposal-job-main {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.proposal-job-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposal-job-header strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.92rem;
+}
+
+.proposal-job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.proposal-job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
 .proposal-writer-trigger,
 .proposal-generate {
   display: inline-flex;
@@ -1384,9 +1434,18 @@ body.proposal-drawer-open {
 
   .proposal-section-title,
   .proposal-output-header,
+  .proposal-job,
   .proposal-drawer-footer {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .proposal-job-actions {
+    justify-content: stretch;
+  }
+
+  .proposal-job-actions button {
+    flex: 1 1 auto;
   }
 
   #proposal-section-select {

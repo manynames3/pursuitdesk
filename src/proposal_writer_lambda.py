@@ -17,7 +17,7 @@ from .api_v1_endpoints import (
 )
 
 PROPOSAL_JOBS_TABLE = os.getenv("PROPOSAL_JOBS_TABLE", "")
-PROPOSAL_JOB_TTL_SECONDS = int(os.getenv("PROPOSAL_JOB_TTL_SECONDS", "86400"))
+PROPOSAL_JOB_TTL_SECONDS = int(os.getenv("PROPOSAL_JOB_TTL_SECONDS", "2592000"))
 
 
 def lambda_handler(event: Mapping[str, Any], _context: Any) -> Dict[str, Any]:
@@ -29,6 +29,8 @@ def lambda_handler(event: Mapping[str, Any], _context: Any) -> Dict[str, Any]:
         return _response(204, {})
 
     if _request_method(event) == "GET":
+        if _is_jobs_collection_request(event):
+            return _list_proposal_writer_jobs(event)
         return _get_proposal_writer_job(event)
 
     try:
@@ -91,7 +93,61 @@ def _get_proposal_writer_job(event: Mapping[str, Any]) -> Dict[str, Any]:
     item = _load_job(job_id)
     if not item:
         return _response(404, {"detail": "Proposal Writer job not found.", "job_id": job_id})
+    context = _request_context(event)
+    if item.get("tenant_slug") and item.get("tenant_slug") != context.get("tenant_slug"):
+        return _response(404, {"detail": "Proposal Writer job not found.", "job_id": job_id})
     return _response(200, _job_public_payload(item))
+
+
+def _list_proposal_writer_jobs(event: Mapping[str, Any]) -> Dict[str, Any]:
+    if not PROPOSAL_JOBS_TABLE:
+        return _response(200, {"items": [], "count": 0, "tenant_slug": _request_context(event).get("tenant_slug")})
+
+    from boto3.dynamodb.conditions import Attr, Key
+
+    context = _request_context(event)
+    params = _query_params(event)
+    tenant_slug = str(context.get("tenant_slug") or DEFAULT_TENANT_SLUG)
+    opportunity_id = str(params.get("opportunity_id") or "").strip()
+    limit = _bounded_limit(params.get("limit"), default=20, maximum=50)
+    items = []
+    response: Dict[str, Any] = {}
+    query_kwargs: Dict[str, Any] = {
+        "IndexName": "tenant-created-at-index",
+        "KeyConditionExpression": Key("tenant_slug").eq(tenant_slug),
+        "ScanIndexForward": False,
+        "Limit": min(max(limit * 3, limit), 100),
+    }
+    if opportunity_id:
+        query_kwargs["FilterExpression"] = Attr("opportunity_id").eq(opportunity_id)
+
+    try:
+        while len(items) < limit:
+            if response.get("LastEvaluatedKey"):
+                query_kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+            response = _jobs_table().query(**query_kwargs)
+            items.extend(response.get("Items") or [])
+            if not response.get("LastEvaluatedKey"):
+                break
+    except Exception as exc:
+        return _response(
+            503,
+            {
+                "detail": "Proposal history is not available yet.",
+                "error": type(exc).__name__,
+            },
+        )
+
+    summaries = [_job_summary_payload(item) for item in items[:limit]]
+    return _response(
+        200,
+        {
+            "items": summaries,
+            "count": len(summaries),
+            "tenant_slug": tenant_slug,
+            "opportunity_id": opportunity_id or None,
+        },
+    )
 
 
 def _run_proposal_writer_job(job_id: str) -> Dict[str, Any]:
@@ -194,6 +250,7 @@ def _job_public_payload(item: Mapping[str, Any]) -> Dict[str, Any]:
         "started_at": item.get("started_at"),
         "completed_at": item.get("completed_at"),
         "generation_mode": item.get("generation_mode") or "async_bedrock_sonnet_job",
+        "has_draft": bool(str(item.get("draft") or "").strip()),
         "legal_disclaimer": _procurement_decision_disclaimer(),
     }
     if item.get("draft"):
@@ -203,6 +260,45 @@ def _job_public_payload(item: Mapping[str, Any]) -> Dict[str, Any]:
     if item.get("error"):
         payload["error"] = item.get("error")
     return payload
+
+
+def _job_summary_payload(item: Mapping[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "job_id": item.get("job_id"),
+        "status": item.get("status"),
+        "target_section": item.get("target_section"),
+        "opportunity_id": item.get("opportunity_id"),
+        "opportunity_title": item.get("opportunity_title"),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "started_at": item.get("started_at"),
+        "completed_at": item.get("completed_at"),
+        "generation_mode": item.get("generation_mode") or "async_bedrock_sonnet_job",
+        "has_draft": bool(str(item.get("draft") or "").strip()),
+    }
+    if item.get("error"):
+        payload["error"] = item.get("error")
+    return payload
+
+
+def _is_jobs_collection_request(event: Mapping[str, Any]) -> bool:
+    path_parameters = event.get("pathParameters") or {}
+    if path_parameters.get("job_id"):
+        return False
+    path = str(event.get("rawPath") or event.get("path") or "").rstrip("/")
+    return path == "/api/v1/proposal-writer/jobs"
+
+
+def _query_params(event: Mapping[str, Any]) -> Dict[str, Any]:
+    return dict(event.get("queryStringParameters") or {})
+
+
+def _bounded_limit(value: Any, default: int, maximum: int) -> int:
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        limit = default
+    return max(1, min(limit, maximum))
 
 
 def _job_id_from_event(event: Mapping[str, Any]) -> str:

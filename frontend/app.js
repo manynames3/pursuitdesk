@@ -174,6 +174,8 @@ const els = {
   proposalLoadingStatus: document.querySelector("#proposal-loading-status"),
   proposalOutput: document.querySelector("#proposal-output"),
   proposalError: document.querySelector("#proposal-error"),
+  proposalLibrary: document.querySelector("#proposal-library"),
+  proposalHistory: document.querySelector("#proposal-history"),
   exportBrief: document.querySelector("#export-brief"),
   proposalDownloadDocx: document.querySelector("#proposal-download-docx"),
   proposalDownloadPdf: document.querySelector("#proposal-download-pdf"),
@@ -277,6 +279,8 @@ els.proposalCopy.addEventListener("click", copyProposalDraft);
 els.proposalDownloadDocx.addEventListener("click", downloadProposalDocx);
 els.proposalDownloadPdf.addEventListener("click", downloadProposalPdf);
 els.proposalOutput.addEventListener("input", syncProposalDraftActions);
+els.proposalLibrary.addEventListener("click", handleProposalHistoryAction);
+els.proposalHistory.addEventListener("click", handleProposalHistoryAction);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.proposalWriterOverlay.hidden) {
     closeProposalWriter();
@@ -331,6 +335,7 @@ async function loadConsultantWorkspace() {
     setApiStatus(offlineStatusLabel);
   }
   renderConsultantWorkspace(consultantWorkspace);
+  await loadProposalLibrary();
 }
 
 async function loadOpportunities({ append = false } = {}) {
@@ -426,6 +431,7 @@ async function loadAnalysis(opportunityId) {
   setProposalDraft("");
   setProposalError("");
   renderAnalysis(data);
+  await loadOpportunityProposalHistory(opportunityId);
 }
 
 function findLoadedOpportunity(opportunityId) {
@@ -558,6 +564,7 @@ async function generateProposalDraft() {
     } else {
       setProposalDraft(response.draft || renderLocalProposalDraft(payload));
     }
+    await refreshProposalHistories();
     setApiStatus("Live API");
   } catch (error) {
     setProposalDraft(renderLocalProposalDraft(payload));
@@ -565,6 +572,13 @@ async function generateProposalDraft() {
   } finally {
     setProposalGenerating(false);
   }
+}
+
+async function refreshProposalHistories() {
+  await Promise.all([
+    loadProposalLibrary(),
+    currentOpportunityId ? loadOpportunityProposalHistory(currentOpportunityId) : Promise.resolve(),
+  ]);
 }
 
 async function pollProposalWriterJob(jobId) {
@@ -587,6 +601,157 @@ async function pollProposalWriterJob(jobId) {
       : "Queued for compliant proposal drafting...");
   }
   throw new Error("Proposal Writer job timed out");
+}
+
+async function loadProposalLibrary() {
+  renderProposalJobs(els.proposalLibrary, [], { loading: true, emptyMessage: "Loading proposal library..." });
+  try {
+    const data = await fetchProposalJobs({ limit: 10 });
+    renderProposalJobs(els.proposalLibrary, data.items || [], {
+      emptyMessage: "Completed proposal drafts for this client will appear here.",
+      showOpportunity: true,
+    });
+  } catch (error) {
+    renderProposalJobs(els.proposalLibrary, [], {
+      emptyMessage: "Proposal library is unavailable right now.",
+    });
+  }
+}
+
+async function loadOpportunityProposalHistory(opportunityId) {
+  if (!opportunityId) {
+    renderProposalJobs(els.proposalHistory, [], { emptyMessage: "Select an opportunity to see proposal history." });
+    return;
+  }
+  renderProposalJobs(els.proposalHistory, [], { loading: true, emptyMessage: "Loading proposal history..." });
+  try {
+    const data = await fetchProposalJobs({ opportunityId, limit: 8 });
+    renderProposalJobs(els.proposalHistory, data.items || [], {
+      emptyMessage: "No proposal drafts have been generated for this opportunity yet.",
+    });
+  } catch (error) {
+    renderProposalJobs(els.proposalHistory, [], {
+      emptyMessage: "Proposal history is unavailable right now.",
+    });
+  }
+}
+
+async function fetchProposalJobs({ opportunityId = "", limit = 10 } = {}) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (opportunityId) params.set("opportunity_id", opportunityId);
+  return fetchJson(`${apiBaseUrl}/api/v1/proposal-writer/jobs?${params.toString()}`);
+}
+
+async function fetchProposalJob(jobId) {
+  return fetchJson(`${apiBaseUrl}/api/v1/proposal-writer/jobs/${encodeURIComponent(jobId)}`);
+}
+
+function renderProposalJobs(element, jobs, options = {}) {
+  if (!element) return;
+  const message = options.emptyMessage || "No proposal drafts available.";
+  if (options.loading) {
+    element.innerHTML = `<div class="empty">${escapeHtml(message)}</div>`;
+    return;
+  }
+  element.innerHTML = jobs.length
+    ? jobs.map((job) => {
+        const ready = job.status === "succeeded" && job.has_draft;
+        const section = job.target_section || "Proposal draft";
+        const opportunityTitle = job.opportunity_title || job.opportunity_id || "Opportunity pending";
+        return `
+          <article class="proposal-job">
+            <div class="proposal-job-main">
+              <div class="proposal-job-header">
+                <strong>${escapeHtml(section)}</strong>
+                <span class="badge ${escapeHtml(proposalJobStatusClass(job.status))}">${escapeHtml(titleCase(job.status || "queued"))}</span>
+              </div>
+              <div class="proposal-job-meta">
+                ${options.showOpportunity ? `<span>${escapeHtml(opportunityTitle)}</span>` : ""}
+                <span>${escapeHtml(formatProposalJobDate(job))}</span>
+                <span>${escapeHtml(formatGenerationMode(job.generation_mode))}</span>
+              </div>
+              ${job.error ? `<div class="row-note">${escapeHtml(job.error)}</div>` : ""}
+            </div>
+            <div class="proposal-job-actions">
+              <button class="secondary compact-button" type="button" data-proposal-action="open" data-job-id="${escapeHtml(job.job_id)}" ${ready ? "" : "disabled"}>Open</button>
+              <button class="secondary compact-button" type="button" data-proposal-action="pdf" data-job-id="${escapeHtml(job.job_id)}" ${ready ? "" : "disabled"}>PDF</button>
+              <button class="secondary compact-button" type="button" data-proposal-action="docx" data-job-id="${escapeHtml(job.job_id)}" ${ready ? "" : "disabled"}>DOCX</button>
+            </div>
+          </article>
+        `;
+      }).join("")
+    : `<div class="empty">${escapeHtml(message)}</div>`;
+}
+
+async function handleProposalHistoryAction(event) {
+  const button = event.target.closest("[data-proposal-action]");
+  if (!button) return;
+  const jobId = button.dataset.jobId;
+  const action = button.dataset.proposalAction;
+  if (!jobId || !action) return;
+
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Loading...";
+  try {
+    const job = await fetchProposalJob(jobId);
+    if (!job.draft) throw new Error("Proposal draft is not available.");
+    if (action === "pdf") {
+      downloadBlob(createPdfBlob(job.draft), `${proposalJobFilename(job)}.pdf`);
+      return;
+    }
+    if (action === "docx") {
+      downloadBlob(createDocxBlob(job.draft), `${proposalJobFilename(job)}.docx`);
+      return;
+    }
+    await openProposalJob(job);
+  } catch (error) {
+    setProposalError("Could not load that proposal draft.");
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+async function openProposalJob(job) {
+  if (job.opportunity_id && job.opportunity_id !== currentOpportunityId) {
+    await loadAnalysis(job.opportunity_id);
+  }
+  const sectionKey = sectionKeyFromLabel(job.target_section);
+  if (sectionKey) selectProposalSection(sectionKey);
+  syncProposalWriterContext();
+  setProposalDraft(job.draft || "");
+  setProposalError("");
+  openProposalWriter();
+}
+
+function proposalJobFilename(job) {
+  const section = sectionKeyFromLabel(job.target_section).replace(/_/g, "-");
+  return safeFilename(`proposal-${section}-${job.opportunity_id || job.job_id || "draft"}`);
+}
+
+function sectionKeyFromLabel(label) {
+  const normalized = String(label || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+  const section = proposalSections.find((item) => item.key === normalized || item.label.toLowerCase() === String(label || "").toLowerCase());
+  return section?.key || normalized || "proposal";
+}
+
+function formatProposalJobDate(job) {
+  const value = job.completed_at || job.updated_at || job.created_at;
+  return value ? `Generated ${formatDate(value)}` : "Date pending";
+}
+
+function formatGenerationMode(mode) {
+  if (!mode) return "AI draft";
+  if (String(mode).includes("sonnet")) return "Sonnet draft";
+  if (String(mode).includes("nova")) return "Nova draft";
+  return "AI draft";
+}
+
+function proposalJobStatusClass(status) {
+  if (status === "succeeded") return "ready";
+  if (status === "failed") return "failed";
+  return "info";
 }
 
 function buildProposalWriterPayload() {

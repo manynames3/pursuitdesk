@@ -110,6 +110,47 @@ class PastPerformanceImport(BaseModel):
     rows: List[PastPerformanceRow] = Field(..., min_length=1, max_length=250)
 
 
+class ClientIntakeRequest(BaseModel):
+    company_name: str = Field(..., min_length=2, max_length=180)
+    primary_contact_email: str = Field(..., min_length=5, max_length=240)
+    primary_contact_name: Optional[str] = Field(None, max_length=160)
+    tenant_slug: Optional[str] = Field(None, pattern="^[a-z0-9][a-z0-9-]{2,62}$")
+    canonical_uei: Optional[str] = Field(None, min_length=12, max_length=12)
+    cage_code: Optional[str] = Field(None, min_length=5, max_length=5)
+    target_naics_codes: List[str] = Field(default_factory=list, max_length=20)
+    target_psc_codes: List[str] = Field(default_factory=list, max_length=20)
+    target_agency_codes: List[str] = Field(default_factory=list, max_length=20)
+    contract_vehicles: List[str] = Field(default_factory=list, max_length=20)
+    set_aside_eligibilities: List[str] = Field(default_factory=list, max_length=20)
+    clearance_levels: List[str] = Field(default_factory=list, max_length=12)
+    socioeconomic_tags: List[str] = Field(default_factory=list, max_length=20)
+    max_single_award_value: Optional[Decimal] = Field(None, ge=0)
+    capacity_notes: Optional[str] = Field(None, max_length=1200)
+    consultant_notes: Optional[str] = Field(None, max_length=2000)
+    past_performance: List[PastPerformanceRow] = Field(default_factory=list, max_length=25)
+
+
+class WhiteLabelSettingsUpdate(BaseModel):
+    organization_name: str = Field("GovCon Advisory Practice", min_length=2, max_length=180)
+    logo_url: Optional[str] = Field(None, max_length=500)
+    primary_color: str = Field("#0f766e", pattern="^#[0-9A-Fa-f]{6}$")
+    report_footer: str = Field(
+        "Prepared by your GovCon advisor. Decision support only; not legal or procurement advice.",
+        min_length=3,
+        max_length=600,
+    )
+    support_email: Optional[str] = Field(None, max_length=240)
+
+
+class ReminderCreate(BaseModel):
+    opportunity_id: Optional[str] = Field(None, min_length=1, max_length=128)
+    reminder_type: str = Field("client_follow_up", pattern="^(client_follow_up|deadline|document_request|proposal_task|renewal|billing)$")
+    title: str = Field(..., min_length=2, max_length=180)
+    body: str = Field("", max_length=1200)
+    due_at: datetime
+    client_visible: bool = False
+
+
 class BillingCheckoutRequest(BaseModel):
     success_url: Optional[str] = None
     cancel_url: Optional[str] = None
@@ -304,6 +345,180 @@ def get_workspace_summary(request: Request, conn=Depends(get_db_connection)) -> 
     }
 
 
+@router.get("/consultant/workspace")
+def get_consultant_workspace(request: Request, conn=Depends(get_db_connection)) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    return _consultant_workspace_payload(conn, context)
+
+
+def _consultant_workspace_payload(
+    conn,
+    context: Mapping[str, Any],
+    active_tenant_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    teams = _fetch_customer_teams(conn)
+    data_freshness = _fetch_data_freshness(conn)
+    compliance = _fetch_compliance_controls(conn)
+    white_label = _fetch_white_label_settings(conn, context)
+    clients = []
+    for team in teams:
+        tenant_id = team.get("tenant_id")
+        past_performance = _fetch_past_performance(conn, tenant_id, limit=5)
+        pipeline = _fetch_pipeline_summary(conn, tenant_id)
+        billing = _fetch_billing_account(conn, tenant_id)
+        readiness = _client_readiness_score(team, past_performance, pipeline)
+        recompetes = _fetch_recompete_signals(conn, team, limit=5)
+        clients.append(
+            {
+                "tenant_id": tenant_id,
+                "tenant_slug": team.get("tenant_slug"),
+                "tenant_name": team.get("tenant_name"),
+                "company_name": team.get("company_name"),
+                "plan_tier": team.get("plan_tier"),
+                "profile": team,
+                "readiness": readiness,
+                "pipeline": pipeline,
+                "billing": billing,
+                "past_performance": past_performance,
+                "recommended_opportunities": _fetch_recommended_opportunities(conn, team, limit=5),
+                "recompete_signals": recompetes,
+                "reminders": _fetch_consultant_reminders(conn, tenant_id, include_done=False),
+                "client_portal": _client_portal_summary(team, readiness, pipeline),
+            }
+        )
+
+    active_id = active_tenant_id or context.get("tenant_id")
+    active_client = next((client for client in clients if client.get("tenant_id") == active_id), clients[0] if clients else {})
+    return {
+        "positioning": _product_positioning(),
+        "security_context": context,
+        "portfolio": _consultant_portfolio_summary(clients),
+        "active_client": active_client,
+        "clients": clients,
+        "deliverables": _consultant_deliverables(active_client),
+        "demo_flow": _polished_demo_flow(active_client),
+        "white_label": white_label,
+        "trust_posture": _trust_posture(context, data_freshness, compliance),
+        "data_freshness": data_freshness,
+        "compliance_controls": compliance,
+    }
+
+
+@router.post("/consultant/clients/intake")
+def create_client_from_intake(
+    request: Request,
+    payload: ClientIntakeRequest,
+    conn=Depends(get_db_connection),
+) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    if context.get("role") not in {"admin", "capture_manager", "analyst"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role for client intake.")
+    client = _upsert_client_from_intake(conn, context, payload)
+    _record_audit_event(
+        conn,
+        context=context,
+        request=request,
+        action="consultant.client_intake",
+        resource_type="tenant",
+        resource_id=client["tenant_id"],
+        metadata={"tenant_slug": client["tenant_slug"], "company_name": payload.company_name},
+    )
+    conn.commit()
+    return {
+        "client": client,
+        "workspace": _consultant_workspace_payload(conn, context, active_tenant_id=client["tenant_id"]),
+    }
+
+
+@router.get("/consultant/settings/white-label")
+def get_white_label_settings(request: Request, conn=Depends(get_db_connection)) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    return {"settings": _fetch_white_label_settings(conn, context)}
+
+
+@router.put("/consultant/settings/white-label")
+def update_white_label_settings(
+    request: Request,
+    payload: WhiteLabelSettingsUpdate,
+    conn=Depends(get_db_connection),
+) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    if context.get("role") not in {"admin", "capture_manager"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins or capture managers can update branding.")
+    settings = _upsert_white_label_settings(conn, context, payload)
+    _record_audit_event(
+        conn,
+        context=context,
+        request=request,
+        action="consultant.white_label_update",
+        resource_type="tenant",
+        resource_id=context["tenant_id"],
+        metadata={"organization_name": settings.get("organization_name")},
+    )
+    conn.commit()
+    return {"settings": settings}
+
+
+@router.get("/consultant/reminders")
+def list_consultant_reminders(request: Request, conn=Depends(get_db_connection)) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    return {"items": _fetch_consultant_reminders(conn, context.get("tenant_id"), include_done=False)}
+
+
+@router.post("/consultant/reminders")
+def create_consultant_reminder(
+    request: Request,
+    payload: ReminderCreate,
+    conn=Depends(get_db_connection),
+) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    if context.get("role") not in {"admin", "capture_manager", "analyst"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role for reminder creation.")
+    reminder = _create_consultant_reminder(conn, context, payload)
+    _record_audit_event(
+        conn,
+        context=context,
+        request=request,
+        action="consultant.reminder_create",
+        resource_type="consultant_reminder",
+        resource_id=reminder["reminder_id"],
+        metadata={"title": reminder["title"], "due_at": reminder["due_at"]},
+    )
+    conn.commit()
+    return {"reminder": reminder, "items": _fetch_consultant_reminders(conn, context.get("tenant_id"), include_done=False)}
+
+
+@router.get("/consultant/client-portal")
+def get_client_portal(request: Request, conn=Depends(get_db_connection)) -> Dict[str, Any]:
+    context = _load_request_context(conn, request)
+    profile = _fetch_customer_profile(conn, context.get("tenant_id"))
+    past_performance = _fetch_past_performance(conn, context.get("tenant_id"), limit=5)
+    pipeline = _fetch_pipeline_summary(conn, context.get("tenant_id"))
+    readiness = _client_readiness_score(profile, past_performance, pipeline)
+    return {
+        "security_context": context,
+        "profile": profile,
+        "readiness": readiness,
+        "portal": _client_portal_summary(profile, readiness, pipeline),
+        "recommended_opportunities": _fetch_recommended_opportunities(conn, profile, limit=8),
+        "reminders": _fetch_consultant_reminders(conn, context.get("tenant_id"), include_done=False, client_visible_only=True),
+        "white_label": _fetch_white_label_settings(conn, context),
+    }
+
+
+@router.get("/consultant/client-report.md")
+def get_consultant_client_report_markdown(request: Request, conn=Depends(get_db_connection)) -> Response:
+    workspace = get_consultant_workspace(request, conn)
+    markdown = _render_client_report_markdown(workspace)
+    client = workspace.get("active_client", {})
+    slug = client.get("tenant_slug") or "client"
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"content-disposition": f"attachment; filename=govcon-client-report-{slug}.md"},
+    )
+
+
 @router.get("/health")
 def get_health(conn=Depends(get_db_connection)) -> Dict[str, Any]:
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -472,18 +687,31 @@ def _build_capture_analysis_response(
     response["market_baseline"] = _json_safe(market_baseline.get("competitive_baseline", {}))
     response["calc_plus_benchmarks"] = benchmarks
     response["customer_profile"] = customer_profile
-    response["customer_score"] = _customer_score_breakdown(
+    customer_score = _customer_score_breakdown(
         customer_profile,
         response.get("opportunity", {}),
         response.get("competitive_baseline", {}),
         response["market_baseline"],
     )
+    response["customer_score"] = customer_score
     response["workflow"] = _fetch_workflow(conn, context.get("tenant_id"), response["opportunity"]["opportunity_id"])
     response["notes"] = _fetch_notes(conn, context.get("tenant_id"), response["opportunity"]["opportunity_id"], limit=5)
     response["past_performance"] = _fetch_past_performance(conn, context.get("tenant_id"), limit=8)
     response["billing"] = _fetch_billing_account(conn, context.get("tenant_id"))
     response["compliance_controls"] = _fetch_compliance_controls(conn)
-    response["evidence"] = _fetch_evidence_bundle(conn, response, benchmarks)
+    response["recommended_action"] = _opportunity_recommended_action(
+        response.get("opportunity", {}),
+        response.get("competitive_baseline", {}),
+        customer_score,
+    )
+    response["capture_tasks"] = _capture_task_plan(response["recommended_action"], response.get("opportunity", {}))
+    response["deliverables"] = _opportunity_deliverables(response["recommended_action"], response.get("opportunity", {}))
+    response["incumbent_recompete_signals"] = _fetch_recompete_signals(conn, customer_profile, limit=5)
+    response["evidence"] = _with_live_opportunity_evidence(
+        _fetch_evidence_bundle(conn, response, benchmarks),
+        response.get("opportunity", {}),
+        response.get("competitive_baseline", {}),
+    )
     response["data_freshness"] = _fetch_data_freshness(conn)
     response["security_context"] = context
     response["metadata"] = {
@@ -514,6 +742,8 @@ def _build_structural_capture_response(
         "historical_match_count": 0,
         "total_matched_obligation": 0,
     }
+    customer_score = _customer_score_breakdown(customer_profile, opportunity, baseline, market_baseline)
+    recommended_action = _opportunity_recommended_action(opportunity, baseline, customer_score)
     response: Dict[str, Any] = {
         "opportunity": opportunity,
         "competing_primes": [],
@@ -522,7 +752,11 @@ def _build_structural_capture_response(
         "market_baseline": market_baseline,
         "calc_plus_benchmarks": benchmarks,
         "customer_profile": customer_profile,
-        "customer_score": _customer_score_breakdown(customer_profile, opportunity, baseline, market_baseline),
+        "customer_score": customer_score,
+        "recommended_action": recommended_action,
+        "capture_tasks": _capture_task_plan(recommended_action, opportunity),
+        "deliverables": _opportunity_deliverables(recommended_action, opportunity),
+        "incumbent_recompete_signals": _fetch_recompete_signals(conn, customer_profile, limit=5),
         "workflow": _fetch_workflow(conn, context.get("tenant_id"), opportunity["opportunity_id"]),
         "notes": _fetch_notes(conn, context.get("tenant_id"), opportunity["opportunity_id"], limit=5),
         "past_performance": _fetch_past_performance(conn, context.get("tenant_id"), limit=8),
@@ -700,7 +934,11 @@ def _fetch_customer_teams(conn) -> List[Dict[str, Any]]:
                   t.tenant_name,
                   t.plan_tier,
                   cp.customer_profile_id::text,
+                  cp.entity_id::text,
                   cp.company_name,
+                  e.legal_name AS resolved_entity_name,
+                  e.canonical_uei,
+                  e.cage_code,
                   cp.target_naics_codes,
                   cp.target_psc_codes,
                   cp.target_agency_codes,
@@ -712,6 +950,7 @@ def _fetch_customer_teams(conn) -> List[Dict[str, Any]]:
                   cp.updated_at
                 FROM capture.tenants t
                 JOIN capture.customer_profiles cp ON cp.tenant_id = t.tenant_id
+                LEFT JOIN capture.entities e ON e.entity_id = cp.entity_id
                 WHERE t.plan_tier IN ('demo', 'team', 'enterprise')
                 ORDER BY t.tenant_id, cp.updated_at DESC;
                 """
@@ -1005,6 +1244,711 @@ def _fetch_compliance_controls(conn) -> List[Dict[str, Any]]:
             return []
         raise
     return [_json_safe(dict(row)) for row in rows]
+
+
+def _product_positioning() -> Dict[str, Any]:
+    return {
+        "headline": "GovCon consulting delivery platform for small-business advisors",
+        "wedge": "Consultant workflow, client deliverables, and readiness-to-pipeline execution.",
+        "not_a": "Generic contract search portal or GovWin replacement.",
+        "promise": "Add a client, score readiness, find top pursuits, manage follow-up, and export a branded client report.",
+    }
+
+
+def _polished_demo_flow(active_client: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    has_client = bool(active_client.get("tenant_id"))
+    has_readiness = bool(active_client.get("readiness"))
+    has_pursuits = bool(active_client.get("recommended_opportunities"))
+    return [
+        {"step": "Add client", "status": "complete" if has_client else "open", "description": "Run the intake wizard for a small business."},
+        {"step": "Get readiness", "status": "complete" if has_readiness else "open", "description": "Show readiness score, evidence, and gaps."},
+        {"step": "Get top pursuits", "status": "complete" if has_pursuits else "open", "description": "Prioritize pursue/team/watch/skip opportunities."},
+        {"step": "Export client report", "status": "available" if has_client else "locked", "description": "Create a branded Markdown report for the client."},
+    ]
+
+
+def _upsert_client_from_intake(
+    conn,
+    context: Mapping[str, Any],
+    payload: ClientIntakeRequest,
+) -> Dict[str, Any]:
+    from psycopg2.extras import Json
+
+    tenant_slug = payload.tenant_slug or _slugify(payload.company_name)
+    pricing_strategy = {
+        "max_single_award_value": _json_safe(payload.max_single_award_value),
+        "capacity_notes": payload.capacity_notes,
+    }
+    risk_preferences = {
+        "consultant_notes": payload.consultant_notes,
+        "intake_completed_at": datetime.utcnow().isoformat() + "Z",
+    }
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            WITH tenant AS (
+              INSERT INTO capture.tenants (
+                tenant_slug, tenant_name, plan_tier, data_region,
+                auth_provider, required_mfa, data_retention_days, privacy_contact_email
+              )
+              VALUES (%(tenant_slug)s, %(company_name)s, 'demo', 'us-east-1', 'demo', false, 365, %(email)s)
+              ON CONFLICT (tenant_slug)
+              DO UPDATE SET
+                tenant_name = EXCLUDED.tenant_name,
+                privacy_contact_email = EXCLUDED.privacy_contact_email,
+                updated_at = now()
+              RETURNING tenant_id, tenant_slug, tenant_name
+            ),
+            entity AS (
+              INSERT INTO capture.entities (
+                legal_name, canonical_uei, cage_code, alias_names, source_system, source_payload
+              )
+              VALUES (
+                %(company_name)s,
+                %(canonical_uei)s,
+                %(cage_code)s,
+                ARRAY[]::text[],
+                'consultant_intake',
+                %(source_payload)s::jsonb
+              )
+              ON CONFLICT (normalized_legal_name)
+              DO UPDATE SET
+                canonical_uei = COALESCE(EXCLUDED.canonical_uei, capture.entities.canonical_uei),
+                cage_code = COALESCE(EXCLUDED.cage_code, capture.entities.cage_code),
+                source_payload = capture.entities.source_payload || EXCLUDED.source_payload,
+                updated_at = now()
+              RETURNING entity_id
+            ),
+            lead_user AS (
+              INSERT INTO capture.tenant_users (
+                tenant_id, email, display_name, role, status, last_seen_at
+              )
+              SELECT
+                tenant.tenant_id,
+                %(email)s,
+                COALESCE(%(contact_name)s, %(company_name)s || ' Contact'),
+                'capture_manager',
+                'active',
+                now()
+              FROM tenant
+              ON CONFLICT (tenant_id, (lower(email)))
+              DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                status = 'active',
+                last_seen_at = now(),
+                updated_at = now()
+              RETURNING user_id
+            ),
+            profile AS (
+              INSERT INTO capture.customer_profiles (
+                tenant_id, entity_id, company_name, target_naics_codes, target_psc_codes,
+                target_agency_codes, contract_vehicles, set_aside_eligibilities,
+                clearance_levels, socioeconomic_tags, past_performance_summary,
+                pricing_strategy, risk_preferences
+              )
+              SELECT
+                tenant.tenant_id,
+                entity.entity_id,
+                %(company_name)s,
+                %(target_naics)s::text[],
+                %(target_psc)s::text[],
+                %(target_agencies)s::text[],
+                %(vehicles)s::text[],
+                %(set_asides)s::text[],
+                %(clearances)s::text[],
+                %(socioeconomic)s::text[],
+                '{}'::jsonb,
+                %(pricing_strategy)s::jsonb,
+                %(risk_preferences)s::jsonb
+              FROM tenant, entity
+              ON CONFLICT (tenant_id, company_name)
+              DO UPDATE SET
+                entity_id = EXCLUDED.entity_id,
+                target_naics_codes = EXCLUDED.target_naics_codes,
+                target_psc_codes = EXCLUDED.target_psc_codes,
+                target_agency_codes = EXCLUDED.target_agency_codes,
+                contract_vehicles = EXCLUDED.contract_vehicles,
+                set_aside_eligibilities = EXCLUDED.set_aside_eligibilities,
+                clearance_levels = EXCLUDED.clearance_levels,
+                socioeconomic_tags = EXCLUDED.socioeconomic_tags,
+                pricing_strategy = EXCLUDED.pricing_strategy,
+                risk_preferences = EXCLUDED.risk_preferences,
+                updated_at = now()
+              RETURNING customer_profile_id
+            )
+            INSERT INTO capture.billing_accounts (
+              tenant_id, billing_provider, subscription_status, billing_email, source_payload
+            )
+            SELECT tenant.tenant_id, 'manual', 'trialing', %(email)s, '{"source": "consultant_intake"}'::jsonb
+            FROM tenant
+            ON CONFLICT (tenant_id)
+            DO UPDATE SET
+              billing_email = EXCLUDED.billing_email,
+              updated_at = now()
+            RETURNING tenant_id::text;
+            """,
+            {
+                "tenant_slug": tenant_slug,
+                "company_name": payload.company_name.strip(),
+                "email": payload.primary_contact_email.strip().lower(),
+                "contact_name": payload.primary_contact_name,
+                "canonical_uei": payload.canonical_uei.upper() if payload.canonical_uei else None,
+                "cage_code": payload.cage_code.upper() if payload.cage_code else None,
+                "target_naics": _clean_text_list(payload.target_naics_codes, digits_only=True),
+                "target_psc": _clean_text_list(payload.target_psc_codes, uppercase=True),
+                "target_agencies": _clean_text_list(payload.target_agency_codes),
+                "vehicles": _clean_text_list(payload.contract_vehicles),
+                "set_asides": _clean_text_list(payload.set_aside_eligibilities),
+                "clearances": _clean_text_list(payload.clearance_levels),
+                "socioeconomic": _clean_text_list(payload.socioeconomic_tags),
+                "pricing_strategy": Json(pricing_strategy),
+                "risk_preferences": Json(risk_preferences),
+                "source_payload": Json({"client_intake": payload.model_dump(mode="json", exclude_none=True)}),
+            },
+        )
+        tenant_row = cur.fetchone()
+
+    tenant_id = str(tenant_row["tenant_id"])
+    if payload.past_performance:
+        import_payload = PastPerformanceImport(source="consultant_intake", rows=payload.past_performance)
+        _import_past_performance(conn, {"tenant_id": tenant_id}, import_payload)
+        _refresh_customer_profile_summary(conn, tenant_id)
+
+    return {
+        "tenant_id": tenant_id,
+        "tenant_slug": tenant_slug,
+        "company_name": payload.company_name,
+        "primary_contact_email": payload.primary_contact_email.strip().lower(),
+    }
+
+
+def _fetch_white_label_settings(conn, context: Mapping[str, Any]) -> Dict[str, Any]:
+    tenant_id = context.get("tenant_id")
+    fallback = {
+        "organization_name": "GovCon Advisory Practice",
+        "logo_url": None,
+        "primary_color": "#0f766e",
+        "report_footer": "Prepared by your GovCon advisor. Decision support only; not legal or procurement advice.",
+        "support_email": context.get("email"),
+    }
+    if not tenant_id:
+        return fallback
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT tenant_id::text, organization_name, logo_url, primary_color,
+                       report_footer, support_email, source_payload, updated_at
+                FROM capture.consultant_brand_settings
+                WHERE tenant_id = %(tenant_id)s::uuid
+                LIMIT 1;
+                """,
+                {"tenant_id": tenant_id},
+            )
+            row = cur.fetchone()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return fallback
+        raise
+    return _json_safe(dict(row)) if row else fallback
+
+
+def _upsert_white_label_settings(
+    conn,
+    context: Mapping[str, Any],
+    payload: WhiteLabelSettingsUpdate,
+) -> Dict[str, Any]:
+    from psycopg2.extras import Json
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            INSERT INTO capture.consultant_brand_settings (
+              tenant_id, organization_name, logo_url, primary_color,
+              report_footer, support_email, source_payload
+            )
+            VALUES (
+              %(tenant_id)s::uuid, %(organization_name)s, %(logo_url)s,
+              %(primary_color)s, %(report_footer)s, %(support_email)s,
+              %(source_payload)s::jsonb
+            )
+            ON CONFLICT (tenant_id)
+            DO UPDATE SET
+              organization_name = EXCLUDED.organization_name,
+              logo_url = EXCLUDED.logo_url,
+              primary_color = EXCLUDED.primary_color,
+              report_footer = EXCLUDED.report_footer,
+              support_email = EXCLUDED.support_email,
+              source_payload = EXCLUDED.source_payload,
+              updated_at = now()
+            RETURNING tenant_id::text, organization_name, logo_url, primary_color,
+                      report_footer, support_email, source_payload, updated_at;
+            """,
+            {
+                "tenant_id": context["tenant_id"],
+                "organization_name": payload.organization_name,
+                "logo_url": str(payload.logo_url) if payload.logo_url else None,
+                "primary_color": payload.primary_color,
+                "report_footer": payload.report_footer,
+                "support_email": payload.support_email,
+                "source_payload": Json({"updated_by": context.get("email")}),
+            },
+        )
+        row = cur.fetchone()
+    return _json_safe(dict(row))
+
+
+def _fetch_consultant_reminders(
+    conn,
+    tenant_id: Optional[str],
+    include_done: bool,
+    client_visible_only: bool = False,
+) -> List[Dict[str, Any]]:
+    if not tenant_id:
+        return []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  r.reminder_id::text,
+                  r.tenant_id::text,
+                  r.opportunity_id::text,
+                  o.notice_id,
+                  o.title AS opportunity_title,
+                  r.owner_user_id::text,
+                  u.display_name AS owner_name,
+                  r.reminder_type,
+                  r.title,
+                  r.body,
+                  r.due_at,
+                  r.status,
+                  r.client_visible,
+                  r.updated_at
+                FROM capture.consultant_reminders r
+                LEFT JOIN capture.opportunities o ON o.opportunity_id = r.opportunity_id
+                LEFT JOIN capture.tenant_users u ON u.user_id = r.owner_user_id
+                WHERE r.tenant_id = %(tenant_id)s::uuid
+                  AND (%(include_done)s OR r.status <> 'done')
+                  AND (NOT %(client_visible_only)s OR r.client_visible)
+                ORDER BY r.due_at ASC
+                LIMIT 30;
+                """,
+                {"tenant_id": tenant_id, "include_done": include_done, "client_visible_only": client_visible_only},
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return []
+        raise
+    return [_json_safe(dict(row)) for row in rows]
+
+
+def _create_consultant_reminder(
+    conn,
+    context: Mapping[str, Any],
+    payload: ReminderCreate,
+) -> Dict[str, Any]:
+    from psycopg2.extras import Json
+
+    opportunity = _fetch_opportunity_identity(conn, payload.opportunity_id) if payload.opportunity_id else None
+    if payload.opportunity_id and opportunity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Opportunity was not found: {payload.opportunity_id}")
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            INSERT INTO capture.consultant_reminders (
+              tenant_id, opportunity_id, owner_user_id, reminder_type, title,
+              body, due_at, client_visible, source_payload
+            )
+            VALUES (
+              %(tenant_id)s::uuid, %(opportunity_id)s::uuid, %(owner_user_id)s::uuid,
+              %(reminder_type)s, %(title)s, %(body)s, %(due_at)s, %(client_visible)s,
+              %(source_payload)s::jsonb
+            )
+            RETURNING reminder_id::text, tenant_id::text, opportunity_id::text,
+                      reminder_type, title, body, due_at, status, client_visible, updated_at;
+            """,
+            {
+                "tenant_id": context["tenant_id"],
+                "opportunity_id": opportunity["opportunity_id"] if opportunity else None,
+                "owner_user_id": context.get("user_id"),
+                "reminder_type": payload.reminder_type,
+                "title": payload.title.strip(),
+                "body": payload.body,
+                "due_at": payload.due_at,
+                "client_visible": payload.client_visible,
+                "source_payload": Json({"created_by": context.get("email")}),
+            },
+        )
+        row = cur.fetchone()
+    return _json_safe(dict(row))
+
+
+def _fetch_recommended_opportunities(conn, profile: Mapping[str, Any], limit: int) -> List[Dict[str, Any]]:
+    profile_naics = profile.get("target_naics_codes") or []
+    profile_psc = profile.get("target_psc_codes") or []
+    profile_agencies = profile.get("target_agency_codes") or []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  o.opportunity_id,
+                  o.notice_id,
+                  o.solicitation_number,
+                  o.title,
+                  o.opportunity_type,
+                  o.posted_at,
+                  o.response_deadline,
+                  o.naics_code,
+                  o.psc_code,
+                  o.set_aside_code,
+                  o.set_aside_description,
+                  o.funding_agency_name,
+                  o.funding_agency_code,
+                  o.estimated_value_min,
+                  o.estimated_value_max,
+                  o.currency_code,
+                  o.ui_link,
+                  (
+                    CASE WHEN %(profile_naics)s::text[] IS NOT NULL AND o.naics_code = ANY(%(profile_naics)s::text[]) THEN 0.34 ELSE 0 END
+                    + CASE WHEN %(profile_psc)s::text[] IS NOT NULL AND o.psc_code = ANY(%(profile_psc)s::text[]) THEN 0.24 ELSE 0 END
+                    + CASE WHEN %(profile_agencies)s::text[] IS NOT NULL AND o.funding_agency_code = ANY(%(profile_agencies)s::text[]) THEN 0.16 ELSE 0 END
+                    + CASE WHEN o.sow_embedding IS NOT NULL THEN 0.10 ELSE 0 END
+                    + CASE WHEN o.response_deadline IS NULL OR o.response_deadline >= now() + interval '5 days' THEN 0.08 ELSE 0.02 END
+                    + CASE WHEN o.ui_link IS NOT NULL OR o.description_url IS NOT NULL THEN 0.08 ELSE 0 END
+                  )::double precision AS dashboard_relevance_score
+                FROM capture.opportunities o
+                WHERE o.active_status = 'active'
+                  AND (o.response_deadline IS NULL OR o.response_deadline >= now())
+                  AND (
+                    (%(profile_naics)s::text[] IS NOT NULL AND o.naics_code = ANY(%(profile_naics)s::text[]))
+                    OR (%(profile_psc)s::text[] IS NOT NULL AND o.psc_code = ANY(%(profile_psc)s::text[]))
+                    OR (%(profile_agencies)s::text[] IS NOT NULL AND o.funding_agency_code = ANY(%(profile_agencies)s::text[]))
+                  )
+                ORDER BY dashboard_relevance_score DESC, response_deadline NULLS LAST, posted_at DESC NULLS LAST
+                LIMIT %(limit)s;
+                """,
+                {
+                    "profile_naics": profile_naics or None,
+                    "profile_psc": profile_psc or None,
+                    "profile_agencies": profile_agencies or None,
+                    "limit": limit,
+                },
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return []
+        raise
+
+    opportunities = []
+    for row in rows:
+        item = _opportunity_row(row)
+        action = _recommended_action_from_scores(
+            p_win=0.14 + min(0.24, float(row["dashboard_relevance_score"]) * 0.32),
+            profile_fit=float(row["dashboard_relevance_score"]),
+            has_source=bool(row.get("ui_link")),
+            response_deadline=row.get("response_deadline"),
+        )
+        item["recommended_action"] = action
+        opportunities.append(item)
+    return opportunities
+
+
+def _fetch_recompete_signals(conn, profile: Mapping[str, Any], limit: int) -> List[Dict[str, Any]]:
+    profile_naics = profile.get("target_naics_codes") or []
+    profile_psc = profile.get("target_psc_codes") or []
+    profile_agencies = profile.get("target_agency_codes") or []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  a.award_id::text,
+                  a.piid,
+                  a.award_number,
+                  a.title,
+                  a.description,
+                  a.period_of_performance_end,
+                  a.signed_date,
+                  a.funding_agency_name,
+                  a.funding_agency_code,
+                  a.naics_code,
+                  a.psc_code,
+                  COALESCE(a.total_obligation, a.current_total_value, a.potential_total_value, 0)::numeric AS award_value,
+                  e.legal_name AS incumbent_name,
+                  e.canonical_uei,
+                  CASE
+                    WHEN a.period_of_performance_end BETWEEN current_date AND current_date + interval '9 months' THEN 'near_term_recompete'
+                    WHEN a.period_of_performance_end BETWEEN current_date + interval '9 months' AND current_date + interval '18 months' THEN 'watch_recompete'
+                    ELSE 'market_signal'
+                  END AS signal_type,
+                  (
+                    CASE WHEN %(profile_naics)s::text[] IS NOT NULL AND a.naics_code = ANY(%(profile_naics)s::text[]) THEN 0.34 ELSE 0 END
+                    + CASE WHEN %(profile_psc)s::text[] IS NOT NULL AND a.psc_code = ANY(%(profile_psc)s::text[]) THEN 0.24 ELSE 0 END
+                    + CASE WHEN %(profile_agencies)s::text[] IS NOT NULL AND a.funding_agency_code = ANY(%(profile_agencies)s::text[]) THEN 0.22 ELSE 0 END
+                    + CASE WHEN a.period_of_performance_end BETWEEN current_date AND current_date + interval '18 months' THEN 0.20 ELSE 0.05 END
+                  )::double precision AS signal_score
+                FROM capture.awards a
+                JOIN capture.entities e ON e.entity_id = a.prime_entity_id
+                WHERE
+                  (
+                    (%(profile_naics)s::text[] IS NOT NULL AND a.naics_code = ANY(%(profile_naics)s::text[]))
+                    OR (%(profile_psc)s::text[] IS NOT NULL AND a.psc_code = ANY(%(profile_psc)s::text[]))
+                    OR (%(profile_agencies)s::text[] IS NOT NULL AND a.funding_agency_code = ANY(%(profile_agencies)s::text[]))
+                  )
+                  AND (
+                    a.period_of_performance_end IS NULL
+                    OR a.period_of_performance_end >= current_date - interval '90 days'
+                  )
+                ORDER BY signal_score DESC, a.period_of_performance_end NULLS LAST, award_value DESC
+                LIMIT %(limit)s;
+                """,
+                {
+                    "profile_naics": profile_naics or None,
+                    "profile_psc": profile_psc or None,
+                    "profile_agencies": profile_agencies or None,
+                    "limit": limit,
+                },
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return []
+        raise
+    return [_json_safe(dict(row)) for row in rows]
+
+
+def _client_readiness_score(
+    profile: Mapping[str, Any],
+    past_performance: Sequence[Mapping[str, Any]],
+    pipeline: Mapping[str, Any],
+) -> Dict[str, Any]:
+    summary = profile.get("past_performance_summary") if isinstance(profile.get("past_performance_summary"), Mapping) else {}
+    pricing = profile.get("pricing_strategy") if isinstance(profile.get("pricing_strategy"), Mapping) else {}
+    risk = profile.get("risk_preferences") if isinstance(profile.get("risk_preferences"), Mapping) else {}
+    checks = [
+        _readiness_check("Target market", 18, bool(profile.get("target_naics_codes")) and bool(profile.get("target_psc_codes")), "NAICS and PSC focus areas are defined."),
+        _readiness_check("SAM identity", 14, bool(profile.get("canonical_uei") or profile.get("cage_code")), "UEI or CAGE is linked to the profile."),
+        _readiness_check("Set-aside posture", 13, bool(profile.get("set_aside_eligibilities") or profile.get("socioeconomic_tags")), "Small-business or socioeconomic eligibility is captured."),
+        _readiness_check("Past performance", 20, bool(past_performance) or bool(summary.get("prime_contracts") or summary.get("subcontracts")), "Relevant prime/subcontract history is imported."),
+        _readiness_check("Sales channel", 12, bool(profile.get("contract_vehicles") or profile.get("target_agency_codes")), "Contract vehicles or target agencies are defined."),
+        _readiness_check("Pricing posture", 10, bool(pricing) or bool(profile.get("target_psc_codes")), "Pricing strategy or benchmarkable PSC scope is available."),
+        _readiness_check("Pipeline discipline", 8, bool((pipeline.get("by_status") or [])), "At least one tracked opportunity exists."),
+        _readiness_check("Risk rules", 5, bool(risk), "Bid/no-bid preferences are captured."),
+    ]
+    score = sum(item["weight"] if item["complete"] else 0 for item in checks) / sum(item["weight"] for item in checks)
+    if score >= 0.78:
+        stage = "prime_ready"
+        label = "Prime-ready"
+    elif score >= 0.55:
+        stage = "subcontracting_first"
+        label = "Subcontracting first"
+    else:
+        stage = "not_ready"
+        label = "Needs setup"
+    gaps = [item for item in checks if not item["complete"]]
+    return {
+        "score": round(score, 3),
+        "stage": stage,
+        "label": label,
+        "checks": checks,
+        "gaps": gaps[:6],
+        "next_steps": _client_readiness_next_steps(stage, gaps),
+    }
+
+
+def _readiness_check(label: str, weight: int, complete: bool, evidence: str) -> Dict[str, Any]:
+    return {"label": label, "weight": weight, "complete": complete, "evidence": evidence}
+
+
+def _client_readiness_next_steps(stage: str, gaps: Sequence[Mapping[str, Any]]) -> List[str]:
+    if gaps:
+        return [f"Close readiness gap: {gap['label']}" for gap in gaps[:4]]
+    if stage == "prime_ready":
+        return ["Shortlist high-fit opportunities weekly.", "Prepare bid/no-bid memos for top pursuits.", "Refresh incumbent and pricing evidence before proposal kickoff."]
+    if stage == "subcontracting_first":
+        return ["Build teaming target list.", "Package past performance as subcontractor proof.", "Track prime contractors on similar awards."]
+    return ["Complete SAM/entity profile.", "Define target NAICS/PSC and agencies.", "Import at least three past performance examples."]
+
+
+def _client_portal_summary(
+    profile: Mapping[str, Any],
+    readiness: Mapping[str, Any],
+    pipeline: Mapping[str, Any],
+) -> Dict[str, Any]:
+    next_due = pipeline.get("next_due_at")
+    tasks = readiness.get("next_steps", [])[:3]
+    if next_due:
+        tasks.append(f"Review next pipeline deadline by {next_due}.")
+    return {
+        "client_name": profile.get("company_name") or profile.get("tenant_name"),
+        "status": readiness.get("label"),
+        "visible_widgets": ["readiness", "recommended_opportunities", "document_requests", "weekly_pipeline"],
+        "open_requests": tasks,
+    }
+
+
+def _consultant_portfolio_summary(clients: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    readiness_scores = [float(client.get("readiness", {}).get("score") or 0) for client in clients]
+    pipeline_items = sum(
+        int(item.get("count") or 0)
+        for client in clients
+        for item in client.get("pipeline", {}).get("by_status", [])
+    )
+    return {
+        "client_count": len(clients),
+        "prime_ready_clients": sum(1 for client in clients if client.get("readiness", {}).get("stage") == "prime_ready"),
+        "needs_setup_clients": sum(1 for client in clients if client.get("readiness", {}).get("stage") == "not_ready"),
+        "tracked_pipeline_items": pipeline_items,
+        "high_priority_items": sum(int(client.get("pipeline", {}).get("high_priority") or 0) for client in clients),
+        "average_readiness_score": round(sum(readiness_scores) / len(readiness_scores), 3) if readiness_scores else 0,
+    }
+
+
+def _trust_posture(
+    context: Mapping[str, Any],
+    data_freshness: Sequence[Mapping[str, Any]],
+    compliance: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    live_sources = [row for row in data_freshness if row.get("source_mode") == "live_api"]
+    mock_sources = [row for row in data_freshness if row.get("source_mode") == "mock_seed"]
+    return {
+        "auth_mode": context.get("auth_mode"),
+        "tenant_isolation": "tenant-scoped reads and workflow writes",
+        "billing_status": "configured" if any(row.get("control_key") == "billing.stripe" for row in compliance) else "implementation_ready",
+        "live_source_count": len(live_sources),
+        "mock_source_count": len(mock_sources),
+        "disclaimer": "Decision support only; consultants remain responsible for legal, compliance, and proposal review.",
+    }
+
+
+def _consultant_deliverables(active_client: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    client_name = active_client.get("company_name") or active_client.get("tenant_name") or "Client"
+    return [
+        {"name": "Client readiness report", "format": "Markdown", "status": "available", "description": f"Readiness score, gaps, and next actions for {client_name}."},
+        {"name": "Weekly pursuit shortlist", "format": "Dashboard", "status": "available", "description": "Top recommended opportunities with pursue/team/watch/skip guidance."},
+        {"name": "Bid/no-bid memo", "format": "Markdown", "status": "available per opportunity", "description": "Opportunity fit, risk, evidence, and recommended next step."},
+        {"name": "Client portal view", "format": "Web", "status": "available", "description": "Client-facing requests, pipeline, and readiness status."},
+    ]
+
+
+def _opportunity_recommended_action(
+    opportunity: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    customer_score: Mapping[str, Any],
+) -> Dict[str, Any]:
+    return _recommended_action_from_scores(
+        p_win=float(baseline.get("estimated_p_win") or customer_score.get("company_adjusted_p_win") or 0),
+        profile_fit=float(customer_score.get("profile_fit_score") or 0),
+        has_source=bool(opportunity.get("ui_link") or opportunity.get("description_url")),
+        response_deadline=opportunity.get("response_deadline"),
+    )
+
+
+def _recommended_action_from_scores(
+    p_win: float,
+    profile_fit: float,
+    has_source: bool,
+    response_deadline: Any,
+) -> Dict[str, Any]:
+    deadline = response_deadline
+    if isinstance(deadline, str):
+        try:
+            deadline = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+        except ValueError:
+            deadline = None
+    days_to_deadline = None
+    if isinstance(deadline, datetime):
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        days_to_deadline = (deadline - datetime.now(deadline.tzinfo)).days
+
+    risks = []
+    if not has_source:
+        risks.append("Source link is missing.")
+    if days_to_deadline is not None and days_to_deadline < 5:
+        risks.append("Response deadline is inside five days.")
+    if profile_fit < 0.45:
+        risks.append("Customer profile fit is weak.")
+
+    if days_to_deadline is not None and days_to_deadline < 0:
+        action, priority = "skip", "low"
+    elif p_win >= 0.34 and profile_fit >= 0.65 and not risks:
+        action, priority = "pursue", "high"
+    elif profile_fit >= 0.58:
+        action, priority = "team", "medium"
+    elif p_win >= 0.20 or profile_fit >= 0.45:
+        action, priority = "watch", "medium"
+    else:
+        action, priority = "skip", "low"
+
+    rationale = {
+        "pursue": "Strong profile fit and enough evidence to justify capture work.",
+        "team": "Fit is credible, but teaming or more evidence should come before prime pursuit.",
+        "watch": "Some fit exists; monitor amendments, incumbent signals, and client capacity.",
+        "skip": "Current fit, timing, or evidence does not justify proposal effort.",
+    }[action]
+    return {
+        "action": action,
+        "priority": priority,
+        "rationale": rationale,
+        "p_win": round(p_win, 3),
+        "profile_fit": round(profile_fit, 3),
+        "days_to_deadline": days_to_deadline,
+        "risks": risks,
+    }
+
+
+def _capture_task_plan(
+    recommendation: Mapping[str, Any],
+    opportunity: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    action = recommendation.get("action")
+    base = [
+        {"task": "Confirm solicitation requirements and amendments", "owner": "Consultant", "status": "open"},
+        {"task": "Validate client eligibility, capacity, and past performance fit", "owner": "Consultant", "status": "open"},
+    ]
+    if action == "pursue":
+        base.extend(
+            [
+                {"task": "Draft bid/no-bid memo for client approval", "owner": "Consultant", "status": "open"},
+                {"task": "Build compliance matrix and document request list", "owner": "Proposal lead", "status": "open"},
+                {"task": "Schedule pricing and teaming review", "owner": "Capture lead", "status": "open"},
+            ]
+        )
+    elif action == "team":
+        base.extend(
+            [
+                {"task": "Identify likely primes and subcontracting angle", "owner": "Consultant", "status": "open"},
+                {"task": "Prepare capability statement excerpt for outreach", "owner": "Client", "status": "open"},
+            ]
+        )
+    elif action == "watch":
+        base.append({"task": "Monitor amendments, Q&A, and deadline movement", "owner": "Consultant", "status": "open"})
+    else:
+        base.append({"task": "Record no-bid reason and archive for lessons learned", "owner": "Consultant", "status": "open"})
+    if opportunity.get("response_deadline"):
+        base.append({"task": f"Protect response deadline {opportunity['response_deadline']}", "owner": "Consultant", "status": "open"})
+    return base
+
+
+def _opportunity_deliverables(
+    recommendation: Mapping[str, Any],
+    opportunity: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    return [
+        {"name": "Capture brief", "status": "available", "description": "Client-ready summary with P-win, evidence, competitors, and source links."},
+        {"name": "Bid/no-bid memo", "status": "ready_to_generate", "description": f"Recommended action: {recommendation.get('action', 'watch')}."},
+        {"name": "Compliance checklist", "status": "draft", "description": "Requirements matrix seeded from SAM.gov details and source documents."},
+        {"name": "Teaming outreach list", "status": "draft", "description": "Prime/sub targets based on historical matches and client fit."},
+    ]
 
 
 def _import_past_performance(conn, context: Mapping[str, Any], payload: PastPerformanceImport) -> Dict[str, Any]:
@@ -1354,6 +2298,22 @@ def _fetch_evidence_bundle(
     }
 
 
+def _with_live_opportunity_evidence(
+    evidence: Dict[str, Any],
+    opportunity: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+) -> Dict[str, Any]:
+    items = evidence.get("items") or []
+    if any(item.get("evidence_type") == "opportunity" for item in items):
+        return evidence
+    live = _live_opportunity_evidence(opportunity, baseline)
+    evidence["items"] = live["items"] + items
+    coverage = dict(evidence.get("coverage") or {})
+    coverage["opportunity"] = max(1, int(coverage.get("opportunity") or 0))
+    evidence["coverage"] = coverage
+    return evidence
+
+
 def _score_factor_evidence(analysis: Mapping[str, Any]) -> List[Dict[str, Any]]:
     baseline = analysis.get("competitive_baseline", {})
     inputs = baseline.get("score_inputs", {})
@@ -1555,6 +2515,17 @@ def _live_opportunity_evidence(
     opportunity: Mapping[str, Any],
     baseline: Mapping[str, Any],
 ) -> Dict[str, Any]:
+    enrichment = {}
+    source_payload = opportunity.get("source_payload") if isinstance(opportunity.get("source_payload"), Mapping) else {}
+    if isinstance(source_payload.get("sam_enrichment"), Mapping):
+        enrichment = source_payload["sam_enrichment"]
+    explanation = "Live SAM.gov source record for the selected opportunity."
+    confidence = 0.72
+    if enrichment.get("status") == "enriched":
+        explanation = "Live SAM.gov source record enriched with extracted source text and a pgvector SOW embedding."
+        confidence = 0.86
+    elif baseline.get("model_scope") == "live_sam_structural_only_pending_embedding":
+        explanation = "Live SAM.gov source record for the selected opportunity. Competitor graph analysis is pending SOW embedding enrichment."
     item = {
         "evidence_id": f"live-sam-{opportunity.get('notice_id')}",
         "opportunity_id": opportunity.get("opportunity_id"),
@@ -1569,9 +2540,9 @@ def _live_opportunity_evidence(
         "agency_code": opportunity.get("funding_agency_code"),
         "naics_code": opportunity.get("naics_code"),
         "psc_code": opportunity.get("psc_code"),
-        "explanation": "Live SAM.gov source record for the selected opportunity. Competitor graph analysis is pending SOW embedding enrichment.",
-        "confidence": 0.72,
-        "source_payload": opportunity.get("source_payload") or {},
+        "explanation": explanation,
+        "confidence": confidence,
+        "source_payload": source_payload,
     }
     return {
         "items": [item],
@@ -1749,6 +2720,69 @@ def _render_capture_brief_markdown(analysis: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_client_report_markdown(workspace: Mapping[str, Any]) -> str:
+    client = workspace.get("active_client", {})
+    readiness = client.get("readiness", {})
+    pipeline = client.get("pipeline", {})
+    profile = client.get("profile", {})
+    trust = workspace.get("trust_posture", {})
+    brand = workspace.get("white_label", {})
+    lines = [
+        f"# GovCon Client Report: {client.get('company_name') or client.get('tenant_name') or 'Client'}",
+        "",
+        f"Prepared by: {brand.get('organization_name', 'GovCon Advisory Practice')}",
+        "",
+        "## Readiness",
+        f"- Score: {readiness.get('score', '--')}",
+        f"- Status: {readiness.get('label', '--')}",
+        f"- Target NAICS: {', '.join(profile.get('target_naics_codes') or []) or '--'}",
+        f"- Target PSC: {', '.join(profile.get('target_psc_codes') or []) or '--'}",
+        f"- Vehicles: {', '.join(profile.get('contract_vehicles') or []) or '--'}",
+        "",
+        "## Readiness Gaps",
+    ]
+    for gap in readiness.get("gaps", []):
+        lines.append(f"- {gap.get('label')}: {gap.get('evidence')}")
+    lines.extend(["", "## Next Actions"])
+    for step in readiness.get("next_steps", []):
+        lines.append(f"- {step}")
+    lines.extend(["", "## Recommended Opportunities"])
+    for opp in client.get("recommended_opportunities", [])[:10]:
+        action = opp.get("recommended_action", {})
+        lines.append(
+            f"- {opp.get('title')} ({opp.get('notice_id')}): "
+            f"{str(action.get('action', 'watch')).upper()} - {action.get('rationale', '')}"
+        )
+    lines.extend(["", "## Incumbents And Recompetes"])
+    for signal in client.get("recompete_signals", [])[:10]:
+        lines.append(
+            f"- {signal.get('title') or signal.get('award_number')}: {signal.get('incumbent_name', '--')} "
+            f"through {signal.get('period_of_performance_end', '--')} ({signal.get('signal_type', 'signal')})"
+        )
+    lines.extend(["", "## Reminders And Client Requests"])
+    for reminder in client.get("reminders", [])[:10]:
+        lines.append(f"- {reminder.get('title')} due {reminder.get('due_at', '--')}")
+    lines.extend(["", "## Pipeline"])
+    for item in pipeline.get("by_status", []):
+        lines.append(f"- {item.get('status')}: {item.get('count')}")
+    lines.extend(["", "## Consultant Deliverables"])
+    for deliverable in workspace.get("deliverables", []):
+        lines.append(f"- {deliverable.get('name')}: {deliverable.get('status')} - {deliverable.get('description')}")
+    lines.extend(
+        [
+            "",
+            "## Trust And Source Notes",
+            f"- Auth mode: {trust.get('auth_mode', '--')}",
+            f"- Live sources: {trust.get('live_source_count', 0)}",
+            f"- Mock/demo sources: {trust.get('mock_source_count', 0)}",
+            f"- Disclaimer: {trust.get('disclaimer', '')}",
+            "",
+            brand.get("report_footer", ""),
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _fetch_calc_benchmarks(conn, opportunity_id: str, max_rows: int) -> List[Dict[str, Any]]:
     target_predicate, target_value = _opportunity_predicate(opportunity_id)
     target_sql = f"""
@@ -1886,6 +2920,37 @@ def _clean_code_list(
             if code not in cleaned:
                 cleaned.append(code)
     return cleaned
+
+
+def _clean_text_list(
+    values: Iterable[Any],
+    uppercase: bool = False,
+    digits_only: bool = False,
+) -> List[str]:
+    cleaned: List[str] = []
+    for value in values or []:
+        for part in str(value).split(","):
+            item = part.strip()
+            if not item:
+                continue
+            if uppercase:
+                item = item.upper()
+            if digits_only:
+                item = "".join(ch for ch in item if ch.isdigit())
+                if not item:
+                    continue
+            if item not in cleaned:
+                cleaned.append(item[:80])
+    return cleaned
+
+
+def _slugify(value: str) -> str:
+    slug = "".join(ch if ch.isalnum() else "-" for ch in value.strip().lower())
+    slug = "-".join(part for part in slug.split("-") if part)
+    slug = (slug or "client")[:58].strip("-")
+    if len(slug) < 3:
+        slug = f"{slug}-client"
+    return slug
 
 
 def _opportunity_row(row: Mapping[str, Any]) -> Dict[str, Any]:

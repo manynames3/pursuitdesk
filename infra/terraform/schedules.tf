@@ -1,5 +1,9 @@
+locals {
+  scheduler_enabled = var.enable_gsa_ingest_schedule || var.enable_sam_enrichment_schedule || var.enable_usaspending_awards_schedule
+}
+
 resource "aws_iam_role" "scheduler_invoke_lambda" {
-  count = var.enable_gsa_ingest_schedule ? 1 : 0
+  count = local.scheduler_enabled ? 1 : 0
 
   name = "${local.name_prefix}-scheduler-invoke"
 
@@ -22,7 +26,7 @@ resource "aws_iam_role" "scheduler_invoke_lambda" {
 }
 
 resource "aws_iam_role_policy" "scheduler_invoke_lambda" {
-  count = var.enable_gsa_ingest_schedule ? 1 : 0
+  count = local.scheduler_enabled ? 1 : 0
 
   name = "${local.name_prefix}-scheduler-invoke-lambda"
   role = aws_iam_role.scheduler_invoke_lambda[0].id
@@ -31,12 +35,85 @@ resource "aws_iam_role_policy" "scheduler_invoke_lambda" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = "lambda:InvokeFunction"
-        Resource = aws_lambda_function.backend["ingest"].arn
+        Effect = "Allow"
+        Action = "lambda:InvokeFunction"
+        Resource = compact([
+          var.enable_gsa_ingest_schedule ? aws_lambda_function.backend["ingest"].arn : "",
+          var.enable_sam_enrichment_schedule ? aws_lambda_function.backend["upsert"].arn : "",
+          var.enable_usaspending_awards_schedule ? aws_lambda_function.backend["awards_ingest"].arn : ""
+        ])
       }
     ]
   })
+}
+
+resource "aws_scheduler_schedule" "sam_opportunities_enrichment" {
+  count = var.enable_sam_enrichment_schedule ? 1 : 0
+
+  name        = "${local.name_prefix}-sam-opportunities-enrichment"
+  description = "Low-cost scheduled SAM.gov opportunity SOW extraction and pgvector enrichment for CaptureOS."
+  group_name  = "default"
+
+  schedule_expression          = var.sam_enrichment_schedule_expression
+  schedule_expression_timezone = "UTC"
+  state                        = "ENABLED"
+
+  flexible_time_window {
+    mode                      = "FLEXIBLE"
+    maximum_window_in_minutes = 15
+  }
+
+  target {
+    arn      = aws_lambda_function.backend["upsert"].arn
+    role_arn = aws_iam_role.scheduler_invoke_lambda[0].arn
+    input = jsonencode({
+      source                    = "aws.scheduler"
+      dataset                   = "sam_opportunity_enrichment"
+      mode                      = "enrich_sam_opportunity_embeddings"
+      limit                     = var.sam_enrichment_batch_limit
+      fetch_documents           = true
+      documents_per_opportunity = 1
+    })
+
+    retry_policy {
+      maximum_event_age_in_seconds = 3600
+      maximum_retry_attempts       = 1
+    }
+  }
+}
+
+resource "aws_scheduler_schedule" "usaspending_awards_ingest" {
+  count = var.enable_usaspending_awards_schedule ? 1 : 0
+
+  name        = "${local.name_prefix}-usaspending-awards-ingest"
+  description = "Low-cost scheduled USAspending contract award ingestion for CaptureOS incumbent and recompete signals."
+  group_name  = "default"
+
+  schedule_expression          = var.usaspending_awards_schedule_expression
+  schedule_expression_timezone = "UTC"
+  state                        = "ENABLED"
+
+  flexible_time_window {
+    mode                      = "FLEXIBLE"
+    maximum_window_in_minutes = 30
+  }
+
+  target {
+    arn      = aws_lambda_function.backend["awards_ingest"].arn
+    role_arn = aws_iam_role.scheduler_invoke_lambda[0].arn
+    input = jsonencode({
+      source             = "aws.scheduler"
+      dataset            = "usaspending_contract_awards"
+      lookback_days      = var.usaspending_awards_lookback_days
+      max_pages          = var.usaspending_awards_max_pages
+      upsert_lambda_name = aws_lambda_function.backend["awards_upsert"].function_name
+    })
+
+    retry_policy {
+      maximum_event_age_in_seconds = 3600
+      maximum_retry_attempts       = 1
+    }
+  }
 }
 
 resource "aws_scheduler_schedule" "sam_opportunities_ingest" {

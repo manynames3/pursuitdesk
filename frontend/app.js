@@ -120,6 +120,7 @@ let loadedOpportunities = [];
 let totalOpportunities = 0;
 let customerTeams = [...fallbackTeams];
 let selectedTenantSlug = localStorage.getItem("captureosTenantSlug") || "demo-growth";
+let consultantWorkspace = null;
 
 const els = {
   apiStatus: document.querySelector("#api-status"),
@@ -129,6 +130,38 @@ const els = {
   trackGo: document.querySelector("#track-go"),
   trackNoGo: document.querySelector("#track-no-go"),
   exportBrief: document.querySelector("#export-brief"),
+  exportClientReport: document.querySelector("#export-client-report"),
+  demoFlowStart: document.querySelector("#demo-flow-start"),
+  positioningHeadline: document.querySelector("#positioning-headline"),
+  positioningPromise: document.querySelector("#positioning-promise"),
+  demoFlow: document.querySelector("#demo-flow"),
+  clientIntake: document.querySelector("#client-intake"),
+  intakeCompany: document.querySelector("#intake-company"),
+  intakeEmail: document.querySelector("#intake-email"),
+  intakeUei: document.querySelector("#intake-uei"),
+  intakeCage: document.querySelector("#intake-cage"),
+  intakeNaics: document.querySelector("#intake-naics"),
+  intakeSetAsides: document.querySelector("#intake-set-asides"),
+  portfolioClientCount: document.querySelector("#portfolio-client-count"),
+  portfolioPrimeReady: document.querySelector("#portfolio-prime-ready"),
+  portfolioPipeline: document.querySelector("#portfolio-pipeline"),
+  portfolioReadiness: document.querySelector("#portfolio-readiness"),
+  clientCards: document.querySelector("#client-cards"),
+  readinessScore: document.querySelector("#readiness-score"),
+  readinessLabel: document.querySelector("#readiness-label"),
+  readinessGaps: document.querySelector("#readiness-gaps"),
+  recommendedOpps: document.querySelector("#recommended-opps"),
+  consultantDeliverables: document.querySelector("#consultant-deliverables"),
+  clientPortal: document.querySelector("#client-portal"),
+  reminderForm: document.querySelector("#reminder-form"),
+  reminderTitle: document.querySelector("#reminder-title"),
+  reminderDue: document.querySelector("#reminder-due"),
+  recompeteSignals: document.querySelector("#recompete-signals"),
+  whiteLabelForm: document.querySelector("#white-label-form"),
+  brandName: document.querySelector("#brand-name"),
+  brandColor: document.querySelector("#brand-color"),
+  brandEmail: document.querySelector("#brand-email"),
+  trustPosture: document.querySelector("#trust-posture"),
   opportunities: document.querySelector("#opportunities"),
   opportunityCount: document.querySelector("#opportunity-count"),
   opportunityRange: document.querySelector("#opportunity-range"),
@@ -139,6 +172,10 @@ const els = {
   marketPwin: document.querySelector("#market-pwin"),
   pwinDelta: document.querySelector("#pwin-delta"),
   profileFit: document.querySelector("#profile-fit"),
+  recommendedAction: document.querySelector("#recommended-action"),
+  recommendedRationale: document.querySelector("#recommended-rationale"),
+  captureTasks: document.querySelector("#capture-tasks"),
+  opportunityDeliverables: document.querySelector("#opportunity-deliverables"),
   confidence: document.querySelector("#confidence"),
   matchCount: document.querySelector("#match-count"),
   matchedObligation: document.querySelector("#matched-obligation"),
@@ -163,6 +200,7 @@ els.teamSelect.addEventListener("change", async () => {
   localStorage.setItem("captureosTenantSlug", selectedTenantSlug);
   currentOpportunityId = null;
   currentAnalysis = null;
+  await loadConsultantWorkspace();
   await loadOpportunities({ append: false });
 });
 els.refresh.addEventListener("click", () => loadOpportunities({ append: false }));
@@ -170,11 +208,17 @@ els.loadMore.addEventListener("click", () => loadOpportunities({ append: true })
 els.trackGo.addEventListener("click", () => updateWorkflow("go"));
 els.trackNoGo.addEventListener("click", () => updateWorkflow("no_go"));
 els.exportBrief.addEventListener("click", exportBrief);
+els.exportClientReport.addEventListener("click", exportClientReport);
+els.demoFlowStart.addEventListener("click", () => els.intakeCompany.focus());
+els.clientIntake.addEventListener("submit", submitClientIntake);
+els.reminderForm.addEventListener("submit", submitReminder);
+els.whiteLabelForm.addEventListener("submit", submitWhiteLabel);
 
 initialize();
 
 async function initialize() {
   await loadCustomerTeams();
+  await loadConsultantWorkspace();
   await loadOpportunities({ append: false });
 }
 
@@ -197,6 +241,17 @@ function renderTeamSelect() {
     `<option value="${escapeHtml(team.tenant_slug)}">${escapeHtml(team.tenant_name || team.company_name)}</option>`
   )).join("");
   els.teamSelect.value = selectedTenantSlug;
+}
+
+async function loadConsultantWorkspace() {
+  try {
+    consultantWorkspace = await fetchJson(`${apiBaseUrl}/api/v1/consultant/workspace`);
+    setApiStatus("Live API");
+  } catch (error) {
+    consultantWorkspace = buildFallbackWorkspace();
+    setApiStatus("Local demo data");
+  }
+  renderConsultantWorkspace(consultantWorkspace);
 }
 
 async function loadOpportunities({ append = false } = {}) {
@@ -342,6 +397,118 @@ async function exportBrief() {
   }
 }
 
+async function exportClientReport() {
+  const team = selectedTeam();
+  const fallback = () => downloadText(renderLocalClientReport(consultantWorkspace || buildFallbackWorkspace()), `govcon-client-report-${team.tenant_slug}.md`);
+  try {
+    const response = await fetch(`${apiBaseUrl}/api/v1/consultant/client-report.md`, {
+      headers: requestHeaders({ accept: "text/markdown" }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    downloadText(await response.text(), `govcon-client-report-${team.tenant_slug}.md`);
+  } catch (error) {
+    fallback();
+  }
+}
+
+async function submitClientIntake(event) {
+  event.preventDefault();
+  const payload = {
+    company_name: els.intakeCompany.value.trim(),
+    primary_contact_email: els.intakeEmail.value.trim(),
+    canonical_uei: els.intakeUei.value.trim().toUpperCase() || null,
+    cage_code: els.intakeCage.value.trim().toUpperCase() || null,
+    target_naics_codes: splitCodes(els.intakeNaics.value),
+    set_aside_eligibilities: splitCodes(els.intakeSetAsides.value),
+    socioeconomic_tags: splitCodes(els.intakeSetAsides.value),
+    target_psc_codes: [],
+    contract_vehicles: ["SAM.gov Open Market"],
+    consultant_notes: "Created from public demo intake wizard.",
+  };
+  if (!payload.company_name || !payload.primary_contact_email) return;
+  try {
+    const result = await fetchJson(`${apiBaseUrl}/api/v1/consultant/clients/intake`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (result.client?.tenant_slug) {
+      selectedTenantSlug = result.client.tenant_slug;
+      localStorage.setItem("captureosTenantSlug", selectedTenantSlug);
+    }
+    consultantWorkspace = result.workspace || consultantWorkspace;
+    await loadCustomerTeams();
+    renderConsultantWorkspace(consultantWorkspace);
+    await loadOpportunities({ append: false });
+    els.clientIntake.reset();
+    setApiStatus("Live API");
+  } catch (error) {
+    const created = addFallbackClient(payload);
+    selectedTenantSlug = created.tenant_slug;
+    localStorage.setItem("captureosTenantSlug", selectedTenantSlug);
+    renderTeamSelect();
+    consultantWorkspace = buildFallbackWorkspace();
+    renderConsultantWorkspace(consultantWorkspace);
+    setApiStatus("Local demo data");
+  }
+}
+
+async function submitReminder(event) {
+  event.preventDefault();
+  const title = els.reminderTitle.value.trim();
+  const due = els.reminderDue.value;
+  if (!title || !due) return;
+  try {
+    await fetchJson(`${apiBaseUrl}/api/v1/consultant/reminders`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title,
+        due_at: `${due}T17:00:00Z`,
+        reminder_type: "client_follow_up",
+        client_visible: true,
+      }),
+    });
+    await loadConsultantWorkspace();
+    els.reminderForm.reset();
+    setApiStatus("Live API");
+  } catch (error) {
+    const active = consultantWorkspace?.active_client;
+    if (active) {
+      active.reminders = [
+        ...(active.reminders || []),
+        { title, due_at: `${due}T17:00:00Z`, reminder_type: "client_follow_up", client_visible: true },
+      ];
+      renderConsultantWorkspace(consultantWorkspace);
+    }
+    setApiStatus("Local demo data");
+  }
+}
+
+async function submitWhiteLabel(event) {
+  event.preventDefault();
+  const payload = {
+    organization_name: els.brandName.value.trim() || "GovCon Advisory Practice",
+    primary_color: els.brandColor.value.trim() || "#0f766e",
+    support_email: els.brandEmail.value.trim() || selectedTeam().user_email,
+    report_footer: "Prepared by your GovCon advisor. Decision support only; not legal or procurement advice.",
+  };
+  try {
+    const result = await fetchJson(`${apiBaseUrl}/api/v1/consultant/settings/white-label`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    consultantWorkspace.white_label = result.settings;
+    renderConsultantWorkspace(consultantWorkspace);
+    setApiStatus("Live API");
+  } catch (error) {
+    consultantWorkspace.white_label = payload;
+    renderConsultantWorkspace(consultantWorkspace);
+    setApiStatus("Local demo data");
+  }
+}
+
 function renderOpportunities(items, total = items.length) {
   els.opportunityCount.textContent = numberFormat(total);
   els.opportunityRange.textContent = `Showing ${numberFormat(items.length)} of ${numberFormat(total)}`;
@@ -354,6 +521,154 @@ function renderOpportunities(items, total = items.length) {
   els.opportunities.querySelectorAll(".opp").forEach((button) => {
     button.addEventListener("click", () => loadAnalysis(button.dataset.id));
   });
+}
+
+function renderConsultantWorkspace(workspace) {
+  const portfolio = workspace.portfolio || {};
+  const active = workspace.active_client || {};
+  const readiness = active.readiness || {};
+  const portal = active.client_portal || {};
+  const clients = workspace.clients || [];
+  const positioning = workspace.positioning || {};
+  const whiteLabel = workspace.white_label || {};
+
+  els.positioningHeadline.textContent = positioning.headline || "GovCon consulting delivery platform for small-business advisors";
+  els.positioningPromise.textContent = positioning.promise || "Add a client, get readiness, get top pursuits, export a client report.";
+  renderDemoFlow(workspace.demo_flow || []);
+  els.brandName.value = whiteLabel.organization_name || "";
+  els.brandColor.value = whiteLabel.primary_color || "#0f766e";
+  els.brandEmail.value = whiteLabel.support_email || "";
+
+  els.portfolioClientCount.textContent = numberFormat(portfolio.client_count);
+  els.portfolioPrimeReady.textContent = numberFormat(portfolio.prime_ready_clients);
+  els.portfolioPipeline.textContent = numberFormat(portfolio.tracked_pipeline_items);
+  els.portfolioReadiness.textContent = percent(portfolio.average_readiness_score);
+
+  els.clientCards.innerHTML = clients.length
+    ? clients.map((client) => {
+        const clientReadiness = client.readiness || {};
+        const activeClass = client.tenant_slug === selectedTenantSlug ? " active-client" : "";
+        return `
+          <button class="client-row${activeClass}" type="button" data-tenant="${escapeHtml(client.tenant_slug)}">
+            <strong>${escapeHtml(client.company_name || client.tenant_name)}</strong>
+            <span>${escapeHtml(clientReadiness.label || "Readiness pending")} · ${percent(clientReadiness.score)}</span>
+          </button>
+        `;
+      }).join("")
+    : `<div class="empty">No client profiles available.</div>`;
+  els.clientCards.querySelectorAll(".client-row").forEach((button) => {
+    button.addEventListener("click", async () => {
+      selectedTenantSlug = button.dataset.tenant;
+      localStorage.setItem("captureosTenantSlug", selectedTenantSlug);
+      els.teamSelect.value = selectedTenantSlug;
+      await loadConsultantWorkspace();
+      await loadOpportunities({ append: false });
+    });
+  });
+
+  els.readinessScore.textContent = percent(readiness.score);
+  els.readinessLabel.textContent = readiness.label || "Client readiness pending";
+  els.readinessGaps.innerHTML = (readiness.gaps || []).length
+    ? readiness.gaps.map((gap) => `
+        <div class="row compact">
+          <div class="row-title">
+            <strong>${escapeHtml(gap.label)}</strong>
+            <span class="badge">gap</span>
+          </div>
+          <div class="row-meta">${escapeHtml(gap.evidence || "")}</div>
+        </div>
+      `).join("")
+    : `<div class="row compact"><strong>Ready for active pursuit management.</strong><div class="row-meta">No major readiness gaps found.</div></div>`;
+
+  els.recommendedOpps.innerHTML = (active.recommended_opportunities || []).length
+    ? active.recommended_opportunities.slice(0, 5).map((opp) => {
+        const action = opp.recommended_action || {};
+        return `
+          <div class="row compact">
+            <div class="row-title">
+              <strong>${escapeHtml(opp.title)}</strong>
+              <span class="badge ${escapeHtml(action.action || "watch")}">${escapeHtml(action.action || "watch")}</span>
+            </div>
+            <div class="row-meta">
+              <span>${escapeHtml(opp.funding_agency_name || "--")}</span>
+              <span>${escapeHtml(opp.naics_code || "--")}/${escapeHtml(opp.psc_code || "--")}</span>
+              <span>${percent(opp.dashboard_relevance_score)} fit</span>
+            </div>
+            <div class="row-note">${escapeHtml(action.rationale || "")}</div>
+          </div>
+        `;
+      }).join("")
+    : `<div class="empty">No recommended pursuits matched this client profile yet.</div>`;
+
+  renderSimpleRows(els.consultantDeliverables, workspace.deliverables || [], (item) => `
+    <div class="row-title">
+      <strong>${escapeHtml(item.name)}</strong>
+      <span class="badge">${escapeHtml(item.status)}</span>
+    </div>
+    <div class="row-meta">${escapeHtml(item.description || "")}</div>
+  `);
+
+  const requests = portal.open_requests || [];
+  const reminders = active.reminders || [];
+  els.clientPortal.innerHTML = `
+    <div class="row compact">
+      <div class="row-title">
+        <strong>${escapeHtml(portal.client_name || active.company_name || "--")}</strong>
+        <span class="badge">${escapeHtml(portal.status || "pending")}</span>
+      </div>
+      <div class="row-meta">${escapeHtml((portal.visible_widgets || []).join(", ") || "Client portal widgets pending")}</div>
+    </div>
+    ${requests.length ? requests.map((request) => `<div class="row compact">${escapeHtml(request)}</div>`).join("") : `<div class="empty">No open client requests.</div>`}
+    ${reminders.length ? reminders.slice(0, 4).map((reminder) => `
+      <div class="row compact">
+        <div class="row-title">
+          <strong>${escapeHtml(reminder.title)}</strong>
+          <span class="badge">${formatDate(reminder.due_at)}</span>
+        </div>
+        <div class="row-meta">${escapeHtml(reminder.reminder_type || "reminder")}</div>
+      </div>
+    `).join("") : ""}
+  `;
+
+  renderSimpleRows(els.recompeteSignals, active.recompete_signals || [], (item) => `
+    <div class="row-title">
+      <strong>${escapeHtml(item.title || item.award_number || "Award signal")}</strong>
+      <span class="badge ${escapeHtml(item.signal_type || "watch")}">${escapeHtml(item.signal_type || "signal")}</span>
+    </div>
+    <div class="row-meta">
+      <span>${escapeHtml(item.incumbent_name || "Incumbent pending")}</span>
+      <span>${escapeHtml(item.funding_agency_name || "--")}</span>
+      <span>PoP end ${formatDate(item.period_of_performance_end)}</span>
+      <span>${money(item.award_value)}</span>
+    </div>
+  `);
+
+  const trust = workspace.trust_posture || {};
+  els.trustPosture.innerHTML = `
+    <div class="row compact">
+      <div class="row-title">
+        <strong>${escapeHtml(trust.auth_mode || "auth pending")}</strong>
+        <span class="badge">${escapeHtml(trust.billing_status || "billing")}</span>
+      </div>
+      <div class="row-meta">
+        <span>${numberFormat(trust.live_source_count)} live sources</span>
+        <span>${numberFormat(trust.mock_source_count)} demo sources</span>
+      </div>
+      <div class="row-note">${escapeHtml(trust.disclaimer || "")}</div>
+    </div>
+  `;
+}
+
+function renderDemoFlow(steps) {
+  els.demoFlow.innerHTML = steps.length
+    ? steps.map((step) => `
+        <div class="flow-step">
+          <span class="badge ${escapeHtml(step.status || "open")}">${escapeHtml(step.status || "open")}</span>
+          <strong>${escapeHtml(step.step)}</strong>
+          <small>${escapeHtml(step.description || "")}</small>
+        </div>
+      `).join("")
+    : "";
 }
 
 function opportunityButton(item) {
@@ -395,6 +710,9 @@ function renderAnalysis(data) {
   els.confidence.textContent = baseline.confidence || "--";
   els.matchCount.textContent = baseline.historical_match_count ?? "--";
   els.matchedObligation.textContent = money(baseline.total_matched_obligation);
+  renderRecommendedAction(data.recommended_action || {});
+  renderMiniList(els.captureTasks, data.capture_tasks || [], (item) => `${item.task} · ${item.owner || "Owner pending"}`);
+  renderMiniList(els.opportunityDeliverables, data.deliverables || [], (item) => `${item.name} · ${item.status}`);
 
   els.customerName.textContent = customer.company_name || "--";
   els.customerVehicles.textContent = shortList(customer.contract_vehicles);
@@ -412,6 +730,21 @@ function renderAnalysis(data) {
   renderRates(data.calc_plus_benchmarks || []);
   renderEvidence(data.evidence || {});
   renderNotes(data.notes || []);
+}
+
+function renderRecommendedAction(action) {
+  els.recommendedAction.textContent = action.action ? titleCase(action.action) : "--";
+  els.recommendedRationale.textContent = action.rationale || "Bid/no-bid guidance pending.";
+  els.recommendedAction.className = "";
+  if (action.action) {
+    els.recommendedAction.classList.add(`action-${action.action}`);
+  }
+}
+
+function renderMiniList(element, items, template) {
+  element.innerHTML = items.length
+    ? items.slice(0, 4).map((item) => `<span>${escapeHtml(template(item))}</span>`).join("")
+    : `<span>Pending</span>`;
 }
 
 function renderSecurity(context) {
@@ -560,6 +893,12 @@ function renderRows(items, template) {
     : `<div class="empty">No historical match data available.</div>`;
 }
 
+function renderSimpleRows(element, items, template) {
+  element.innerHTML = items.length
+    ? items.slice(0, 6).map((item) => `<div class="row compact">${template(item)}</div>`).join("")
+    : `<div class="empty">No records available.</div>`;
+}
+
 function renderRates(rows) {
   els.rates.innerHTML = rows.length
     ? `<table>
@@ -699,6 +1038,24 @@ function buildFallbackAnalysis(opportunity = null) {
       ...fallbackAnalysis.competitive_baseline,
       estimated_p_win: isMetalShop ? 0.22 : fallbackAnalysis.competitive_baseline.estimated_p_win,
     },
+    recommended_action: {
+      action: isMetalShop ? "team" : "watch",
+      priority: "medium",
+      rationale: isMetalShop ? "Manufacturing fit is credible; validate drawings, quantities, and prime/sub path." : "Some fit exists; monitor source details and client capacity before proposal effort.",
+      p_win: isMetalShop ? 0.22 : 0.18,
+      profile_fit: isMetalShop ? 0.72 : 0.45,
+      risks: [],
+    },
+    capture_tasks: [
+      { task: "Confirm solicitation requirements and amendments", owner: "Consultant", status: "open" },
+      { task: "Validate client eligibility, capacity, and past performance fit", owner: "Consultant", status: "open" },
+      { task: isMetalShop ? "Identify likely prime or direct award path" : "Monitor source updates and deadline movement", owner: "Capture lead", status: "open" },
+    ],
+    deliverables: [
+      { name: "Capture brief", status: "available" },
+      { name: "Bid/no-bid memo", status: "ready_to_generate" },
+      { name: "Compliance checklist", status: "draft" },
+    ],
     past_performance: isMetalShop
       ? [
           { contract_number: "KEY-NAVSEA-23-014", title: "Shipboard Stainless Guard Assemblies", role: "prime", agency_name: "Department of the Navy", obligated_amount: 1260000 },
@@ -711,6 +1068,128 @@ function buildFallbackAnalysis(opportunity = null) {
       auth_mode: "demo_header_context",
     },
   };
+}
+
+function buildFallbackWorkspace() {
+  const metalPastPerformance = [
+    { contract_number: "KEY-NAVSEA-23-014", title: "Shipboard Stainless Guard Assemblies", role: "prime", agency_name: "Department of the Navy", obligated_amount: 1260000 },
+    { contract_number: "KEY-DLA-24-001", title: "CNC Machined Aluminum Bracket Kits", role: "prime", agency_name: "Defense Logistics Agency", obligated_amount: 740000 },
+  ];
+  const clients = customerTeams.map((team) => {
+    const isMetalShop = team.tenant_slug === "metal-fabrication-shop";
+    const readiness = {
+      score: isMetalShop ? 0.66 : 0.74,
+      label: isMetalShop ? "Subcontracting first" : "Prime-ready",
+      stage: isMetalShop ? "subcontracting_first" : "prime_ready",
+      gaps: isMetalShop
+        ? [
+            { label: "SAM identity", evidence: "UEI/CAGE is not linked in local fallback mode." },
+            { label: "Pricing posture", evidence: "Fabrication rate cards need import." },
+          ]
+        : [{ label: "Risk rules", evidence: "Bid/no-bid preferences should be tightened." }],
+      next_steps: isMetalShop
+        ? ["Close readiness gap: SAM identity", "Package fabrication past performance", "Build teaming target list"]
+        : ["Shortlist high-fit opportunities weekly", "Prepare bid/no-bid memos for top pursuits"],
+    };
+    return {
+      tenant_slug: team.tenant_slug,
+      tenant_name: team.tenant_name,
+      company_name: team.company_name,
+      profile: team,
+      readiness,
+      pipeline: { by_status: [{ status: "tracking", count: isMetalShop ? 2 : 4 }], high_priority: isMetalShop ? 1 : 2 },
+      billing: { subscription_status: "trialing" },
+      past_performance: isMetalShop ? metalPastPerformance : fallbackAnalysis.past_performance,
+      recommended_opportunities: fallbackOpportunities.map((opp) => ({
+        ...opp,
+        dashboard_relevance_score: isMetalShop ? 0.68 : opp.dashboard_relevance_score,
+        recommended_action: {
+          action: isMetalShop ? "team" : "watch",
+          rationale: isMetalShop ? "Fabrication codes and PSCs indicate a possible subcontracting path." : "Monitor until enriched source details improve fit confidence.",
+        },
+      })),
+      recompete_signals: [
+        {
+          title: isMetalShop ? "Aircraft Fairing Fabrication Support" : "Zero Trust Platform Engineering",
+          incumbent_name: isMetalShop ? "Regional Aerospace Prime" : "General Dynamics Information Technology, Inc.",
+          funding_agency_name: isMetalShop ? "Department of the Navy" : "Department of the Air Force",
+          period_of_performance_end: "2026-11-30",
+          award_value: isMetalShop ? 2400000 : 118000000,
+          signal_type: "watch_recompete",
+        },
+      ],
+      reminders: [
+        { title: "Send monthly pursuit report", due_at: "2026-06-01T17:00:00Z", reminder_type: "client_follow_up" },
+      ],
+      client_portal: {
+        client_name: team.company_name,
+        status: readiness.label,
+        visible_widgets: ["readiness", "recommended_opportunities", "document_requests", "weekly_pipeline"],
+        open_requests: readiness.next_steps,
+      },
+    };
+  });
+  const active = clients.find((client) => client.tenant_slug === selectedTenantSlug) || clients[0];
+  return {
+    positioning: {
+      headline: "GovCon consulting delivery platform for small-business advisors",
+      promise: "Add a client, get readiness, get top pursuits, export a client report.",
+    },
+    portfolio: {
+      client_count: clients.length,
+      prime_ready_clients: clients.filter((client) => client.readiness.stage === "prime_ready").length,
+      tracked_pipeline_items: clients.reduce((sum, client) => sum + client.pipeline.by_status.reduce((count, item) => count + item.count, 0), 0),
+      average_readiness_score: clients.reduce((sum, client) => sum + client.readiness.score, 0) / Math.max(1, clients.length),
+    },
+    active_client: active,
+    clients,
+    demo_flow: [
+      { step: "Add client", status: "complete", description: "Run the intake wizard for a small business." },
+      { step: "Get readiness", status: "complete", description: "Show readiness score, evidence, and gaps." },
+      { step: "Get top pursuits", status: "complete", description: "Prioritize pursue/team/watch/skip opportunities." },
+      { step: "Export client report", status: "available", description: "Create a branded report for the client." },
+    ],
+    white_label: {
+      organization_name: "GovCon Advisory Practice",
+      primary_color: "#0f766e",
+      support_email: selectedTeam().user_email,
+    },
+    deliverables: [
+      { name: "Client readiness report", status: "available", description: "Readiness score, gaps, and next actions." },
+      { name: "Weekly pursuit shortlist", status: "available", description: "Top recommended opportunities with action guidance." },
+      { name: "Bid/no-bid memo", status: "available per opportunity", description: "Opportunity fit, risks, and source-backed decision." },
+      { name: "Client portal view", status: "available", description: "Client-facing requests, pipeline, and readiness status." },
+    ],
+    trust_posture: {
+      auth_mode: "demo_header_context",
+      billing_status: "implementation_ready",
+      live_source_count: 1,
+      mock_source_count: 3,
+      disclaimer: "Decision support only; consultants remain responsible for legal, compliance, and proposal review.",
+    },
+  };
+}
+
+function addFallbackClient(payload) {
+  const tenantSlug = slugify(payload.company_name);
+  const client = {
+    tenant_slug: tenantSlug,
+    tenant_name: payload.company_name,
+    company_name: payload.company_name,
+    user_email: payload.primary_contact_email,
+    target_naics_codes: payload.target_naics_codes,
+    target_psc_codes: payload.target_psc_codes,
+    contract_vehicles: payload.contract_vehicles,
+    set_aside_eligibilities: payload.set_aside_eligibilities,
+    clearance_levels: [],
+  };
+  customerTeams = [client, ...customerTeams.filter((team) => team.tenant_slug !== tenantSlug)];
+  return client;
+}
+
+function slugify(value) {
+  const slug = String(value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 58);
+  return slug.length >= 3 ? slug : `${slug || "client"}-client`;
 }
 
 function splitCodes(value) {
@@ -790,6 +1269,29 @@ function renderLocalBrief(data) {
     ...(data.competing_primes || []).slice(0, 3).map((prime) => `- ${prime.legal_name}`),
     "",
   ].join("\n");
+}
+
+function renderLocalClientReport(workspace) {
+  const client = workspace.active_client || {};
+  const readiness = client.readiness || {};
+  const profile = client.profile || {};
+  const lines = [
+    `# GovCon Client Report: ${client.company_name || client.tenant_name || "Client"}`,
+    "",
+    "## Readiness",
+    `- Score: ${percent(readiness.score)}`,
+    `- Status: ${readiness.label || "--"}`,
+    `- Target NAICS: ${shortList(profile.target_naics_codes)}`,
+    `- Target PSC: ${shortList(profile.target_psc_codes)}`,
+    "",
+    "## Gaps",
+    ...(readiness.gaps || []).map((gap) => `- ${gap.label}: ${gap.evidence}`),
+    "",
+    "## Recommended opportunities",
+    ...(client.recommended_opportunities || []).slice(0, 5).map((opp) => `- ${opp.title}: ${(opp.recommended_action || {}).action || "watch"}`),
+    "",
+  ];
+  return lines.join("\n");
 }
 
 function downloadText(text, filename) {

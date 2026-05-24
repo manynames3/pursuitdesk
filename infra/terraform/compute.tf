@@ -4,6 +4,7 @@ locals {
   lambda_base_environment = {
     AWS_USE_DUALSTACK_ENDPOINT = "true"
     APP_PUBLIC_URL             = var.app_public_url
+    BEDROCK_EMBEDDING_MODEL_ID = var.bedrock_embedding_model_id
     AUTH_REQUIRED              = tostring(var.auth_required)
     BEDROCK_MODEL_ID           = var.bedrock_model_id
     DATABASE_HOST              = aws_db_instance.postgres.address
@@ -22,6 +23,7 @@ locals {
     STRIPE_API_KEY_SECRET_ARN  = var.stripe_api_key_secret_arn
     STRIPE_PRICE_ID            = var.stripe_price_id
     STRIPE_WEBHOOK_SECRET_ARN  = var.stripe_webhook_secret_arn
+    SAM_EMBEDDING_PROVIDER     = var.sam_embedding_provider
     VECTOR_STORE               = "pgvector"
   }
 
@@ -109,7 +111,10 @@ resource "aws_iam_role_policy" "lambda_runtime" {
         Action = [
           "lambda:InvokeFunction"
         ]
-        Resource = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-upsert"
+        Resource = [
+          "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-upsert",
+          "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-awards_upsert"
+        ]
       }
       ],
       length(compact([var.sam_api_key_secret_arn, var.stripe_api_key_secret_arn, var.stripe_webhook_secret_arn])) > 0 ? [

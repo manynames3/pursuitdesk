@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import email.utils
+import html
 import hashlib
 import json
 import logging
+import math
 import os
 import random
+import re
 import socket
 import time
 import urllib.error
@@ -24,6 +27,13 @@ DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 DEFAULT_BASE_BACKOFF_SECONDS = float(os.getenv("BASE_BACKOFF_SECONDS", "1.0"))
 DEFAULT_MAX_BACKOFF_SECONDS = float(os.getenv("MAX_BACKOFF_SECONDS", "60.0"))
 DEFAULT_PAGE_LIMIT = min(max(int(os.getenv("PAGE_LIMIT", "1000")), 1), 1000)
+DEFAULT_ENRICHMENT_BATCH_LIMIT = min(max(int(os.getenv("SAM_ENRICHMENT_BATCH_LIMIT", "10")), 1), 100)
+DEFAULT_DOCUMENT_FETCH_TIMEOUT_SECONDS = float(os.getenv("SAM_DOCUMENT_FETCH_TIMEOUT_SECONDS", "4"))
+DEFAULT_DOCUMENT_FETCH_MAX_BYTES = min(max(int(os.getenv("SAM_DOCUMENT_FETCH_MAX_BYTES", "200000")), 10_000), 1_000_000)
+DEFAULT_DOCUMENTS_PER_OPPORTUNITY = min(max(int(os.getenv("SAM_DOCUMENTS_PER_OPPORTUNITY", "1")), 0), 5)
+DEFAULT_ENRICHMENT_MIN_TEXT_CHARS = min(max(int(os.getenv("SAM_ENRICHMENT_MIN_TEXT_CHARS", "80")), 20), 1000)
+DEFAULT_ENRICHMENT_MAX_TEXT_CHARS = min(max(int(os.getenv("SAM_ENRICHMENT_MAX_TEXT_CHARS", "12000")), 1000), 60_000)
+VECTOR_DIMENSION = int(os.getenv("VECTOR_DIMENSION", "1536"))
 PREFER_IPV6_EGRESS = os.getenv("PREFER_IPV6_EGRESS", "true").strip().lower() in {"1", "true", "yes", "on"}
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 DIRECT_FILTER_KEYS = {
@@ -43,6 +53,8 @@ DIRECT_FILTER_KEYS = {
 }
 DATE_FILTER_KEYS = {"rdlfrom", "rdlto"}
 _ORIGINAL_GETADDRINFO = socket.getaddrinfo
+_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_:+.-]{1,80}")
+_ALLOWED_DOCUMENT_HOSTS = ("sam.gov", "gsa.gov")
 
 
 def _install_ipv6_preference() -> None:
@@ -80,6 +92,9 @@ def lambda_handler(event: Mapping[str, Any], context: Any) -> Dict[str, Any]:
     if event.get("mode") == "upsert_sam_records":
         return upsert_sam_records_event(event)
 
+    if event.get("mode") == "enrich_sam_opportunity_embeddings":
+        return enrich_sam_opportunity_embeddings_event(event, context=context)
+
     if "Records" not in event:
         return ingest_direct_event(event, context=context)
 
@@ -116,6 +131,64 @@ def upsert_sam_records_event(event: Mapping[str, Any]) -> Dict[str, Any]:
         source_url=DEFAULT_ENDPOINT,
     )
     return {"normalizedRecords": len(payloads), "writtenRecords": written_count}
+
+
+def enrich_sam_opportunity_embeddings_event(event: Mapping[str, Any], context: Any = None) -> Dict[str, Any]:
+    limit = min(max(int(event.get("limit") or DEFAULT_ENRICHMENT_BATCH_LIMIT), 1), 100)
+    force = _truthy(event.get("force", False))
+    fetch_documents = _truthy(event.get("fetch_documents", os.getenv("SAM_ENRICHMENT_FETCH_DOCUMENTS", "true")))
+    embedding_provider = str(event.get("embedding_provider") or os.getenv("SAM_EMBEDDING_PROVIDER", "deterministic")).strip().lower()
+    document_limit = min(max(int(event.get("documents_per_opportunity") or DEFAULT_DOCUMENTS_PER_OPPORTUNITY), 0), 5)
+    notice_ids = _string_list(event.get("notice_ids") or event.get("notice_id"))
+
+    rows = fetch_sam_enrichment_candidates(limit=limit, notice_ids=notice_ids, force=force)
+    api_key = _resolve_sam_api_key() if fetch_documents else None
+    results: List[Dict[str, Any]] = []
+
+    for row in rows:
+        if not _lambda_time_available(context, reserve_seconds=3.0):
+            results.append({"status": "deferred", "reason": "lambda_time_remaining"})
+            break
+        try:
+            results.append(
+                enrich_sam_opportunity_row(
+                    row,
+                    embedding_provider=embedding_provider,
+                    fetch_documents=fetch_documents,
+                    api_key=api_key,
+                    document_limit=document_limit,
+                )
+            )
+        except Exception as exc:
+            LOGGER.exception("Failed SAM.gov enrichment for notice %s", row.get("notice_id"))
+            results.append({"notice_id": row.get("notice_id"), "status": "failed", "error": str(exc)[:300]})
+
+    enriched = sum(1 for item in results if item.get("status") == "enriched")
+    skipped = sum(1 for item in results if item.get("status") == "skipped")
+    failed = sum(1 for item in results if item.get("status") == "failed")
+    deferred = sum(1 for item in results if item.get("status") == "deferred")
+
+    if rows:
+        update_data_freshness(
+            source_system="SAM.gov",
+            dataset_name="Opportunity Document Enrichment",
+            source_mode="live_api",
+            record_count=count_enriched_sam_opportunities(),
+            source_url="https://sam.gov",
+            freshness_sla_hours=24,
+            notes=f"Document extraction and {embedding_provider} embeddings completed for {enriched} opportunities.",
+        )
+
+    return {
+        "candidateRecords": len(rows),
+        "enrichedRecords": enriched,
+        "skippedRecords": skipped,
+        "failedRecords": failed,
+        "deferredRecords": deferred,
+        "embeddingProvider": embedding_provider,
+        "fetchedDocuments": fetch_documents,
+        "results": results[:25],
+    }
 
 
 def ingest_direct_event(event: Mapping[str, Any], context: Any = None) -> Dict[str, Any]:
@@ -625,6 +698,253 @@ def upsert_opportunities_to_database(records: List[Dict[str, Any]]) -> int:
     return len(records)
 
 
+def fetch_sam_enrichment_candidates(limit: int, notice_ids: List[str], force: bool = False) -> List[Dict[str, Any]]:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor, register_default_jsonb
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise IngestError("DATABASE_URL must be configured for SAM enrichment.")
+
+    with psycopg2.connect(database_url, connect_timeout=10) as conn:
+        register_default_jsonb(conn, loads=json.loads)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  opportunity_id::text,
+                  notice_id,
+                  solicitation_number,
+                  title,
+                  opportunity_type,
+                  posted_at,
+                  response_deadline,
+                  naics_code,
+                  psc_code,
+                  set_aside_code,
+                  set_aside_description,
+                  funding_agency_name,
+                  funding_agency_code,
+                  subtier_name,
+                  office_name,
+                  description_url,
+                  ui_link,
+                  resource_links,
+                  sow_text,
+                  source_payload,
+                  source_updated_at
+                FROM capture.opportunities
+                WHERE active_status = 'active'
+                  AND (%(force)s OR sow_embedding IS NULL OR sow_text IS NULL)
+                  AND (%(notice_ids)s::text[] IS NULL OR notice_id = ANY(%(notice_ids)s::text[]))
+                  AND notice_id NOT LIKE 'SAM-2026-%%'
+                ORDER BY posted_at DESC NULLS LAST, source_updated_at DESC NULLS LAST
+                LIMIT %(limit)s;
+                """,
+                {"force": force, "notice_ids": notice_ids or None, "limit": limit},
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def enrich_sam_opportunity_row(
+    row: Mapping[str, Any],
+    embedding_provider: str,
+    fetch_documents: bool,
+    api_key: Optional[str],
+    document_limit: int,
+) -> Dict[str, Any]:
+    text, sources = build_sam_enrichment_text(row, fetch_documents, api_key, document_limit)
+    if len(text) < DEFAULT_ENRICHMENT_MIN_TEXT_CHARS:
+        patch = {
+            "sam_enrichment": {
+                "status": "skipped",
+                "reason": "insufficient_text",
+                "text_chars": len(text),
+                "attempted_at": datetime.now(timezone.utc).isoformat(),
+                "sources": sources,
+            }
+        }
+        write_sam_enrichment_result(row["opportunity_id"], None, None, patch)
+        return {"notice_id": row.get("notice_id"), "status": "skipped", "reason": "insufficient_text", "textChars": len(text)}
+
+    embedding, provider_label = embed_enrichment_text(text, row, embedding_provider)
+    patch = {
+        "sam_enrichment": {
+            "status": "enriched",
+            "embedding_provider": provider_label,
+            "text_chars": len(text),
+            "source_count": len(sources),
+            "enriched_at": datetime.now(timezone.utc).isoformat(),
+            "sources": sources,
+        }
+    }
+    write_sam_enrichment_result(row["opportunity_id"], text, embedding, patch)
+    return {
+        "notice_id": row.get("notice_id"),
+        "status": "enriched",
+        "textChars": len(text),
+        "sourceCount": len(sources),
+        "embeddingProvider": provider_label,
+    }
+
+
+def build_sam_enrichment_text(
+    row: Mapping[str, Any],
+    fetch_documents: bool,
+    api_key: Optional[str],
+    document_limit: int,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    source_payload = row.get("source_payload") if isinstance(row.get("source_payload"), Mapping) else {}
+    fragments: List[str] = []
+    sources: List[Dict[str, Any]] = []
+
+    metadata_text = _normalize_text(
+        "\n".join(
+            str(value)
+            for value in [
+                row.get("title"),
+                row.get("solicitation_number"),
+                row.get("funding_agency_name"),
+                row.get("subtier_name"),
+                row.get("office_name"),
+                row.get("set_aside_description"),
+                row.get("naics_code"),
+                row.get("psc_code"),
+                row.get("sow_text"),
+                _payload_summary_text(source_payload),
+            ]
+            if value
+        )
+    )
+    if metadata_text:
+        fragments.append(metadata_text)
+        sources.append({"type": "sam_metadata", "chars": len(metadata_text)})
+
+    if fetch_documents and document_limit > 0:
+        for url in _document_urls(row, source_payload)[:document_limit]:
+            document = _fetch_document_text(url, api_key)
+            sources.append(document["source"])
+            if document["text"]:
+                fragments.append(document["text"])
+
+    combined = _normalize_text("\n\n".join(fragments))
+    return combined[:DEFAULT_ENRICHMENT_MAX_TEXT_CHARS], sources
+
+
+def embed_enrichment_text(
+    text: str,
+    row: Mapping[str, Any],
+    provider: str,
+) -> Tuple[List[float], str]:
+    if provider == "bedrock":
+        return _bedrock_embedding(text), os.getenv("BEDROCK_EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v1")
+    if provider in {"deterministic", "hash", "local"}:
+        return _deterministic_text_embedding(text, row), "deterministic_text_hash_v1"
+    raise IngestError(f"Unsupported SAM_EMBEDDING_PROVIDER '{provider}'. Use deterministic or bedrock.")
+
+
+def write_sam_enrichment_result(
+    opportunity_id: str,
+    sow_text: Optional[str],
+    embedding: Optional[List[float]],
+    source_payload_patch: Mapping[str, Any],
+) -> None:
+    import psycopg2
+    from psycopg2.extras import Json
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise IngestError("DATABASE_URL must be configured for SAM enrichment writes.")
+
+    with psycopg2.connect(database_url, connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            if embedding is not None and sow_text:
+                cur.execute(
+                    """
+                    UPDATE capture.opportunities
+                    SET sow_text = %(sow_text)s,
+                        sow_embedding = %(embedding)s::vector,
+                        source_payload = source_payload || %(source_payload_patch)s::jsonb,
+                        updated_at = now()
+                    WHERE opportunity_id = %(opportunity_id)s::uuid;
+                    """,
+                    {
+                        "opportunity_id": opportunity_id,
+                        "sow_text": sow_text,
+                        "embedding": _vector_literal(embedding),
+                        "source_payload_patch": Json(source_payload_patch),
+                    },
+                )
+                cur.execute(
+                    """
+                    DELETE FROM capture.source_evidence
+                    WHERE opportunity_id = %(opportunity_id)s::uuid
+                      AND evidence_type = 'opportunity'
+                      AND source_system = 'SAM.gov';
+
+                    INSERT INTO capture.source_evidence (
+                      opportunity_id, evidence_type, source_system, source_record_id,
+                      source_title, source_url, source_record_date, source_amount,
+                      agency_name, agency_code, naics_code, psc_code, explanation,
+                      confidence, source_payload
+                    )
+                    SELECT
+                      opportunity_id,
+                      'opportunity',
+                      'SAM.gov',
+                      notice_id,
+                      title,
+                      COALESCE(ui_link, description_url),
+                      posted_at::date,
+                      COALESCE(estimated_value_max, estimated_value_min),
+                      funding_agency_name,
+                      funding_agency_code,
+                      naics_code,
+                      psc_code,
+                      'Live SAM.gov opportunity enriched with extracted source text and a pgvector SOW embedding.',
+                      0.8600,
+                      %(source_payload_patch)s::jsonb
+                    FROM capture.opportunities
+                    WHERE opportunity_id = %(opportunity_id)s::uuid;
+                    """,
+                    {"opportunity_id": opportunity_id, "source_payload_patch": Json(source_payload_patch)},
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE capture.opportunities
+                    SET source_payload = source_payload || %(source_payload_patch)s::jsonb,
+                        updated_at = now()
+                    WHERE opportunity_id = %(opportunity_id)s::uuid;
+                    """,
+                    {"opportunity_id": opportunity_id, "source_payload_patch": Json(source_payload_patch)},
+                )
+
+
+def count_enriched_sam_opportunities() -> int:
+    import psycopg2
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return 0
+    with psycopg2.connect(database_url, connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*)::int
+                FROM capture.opportunities
+                WHERE sow_embedding IS NOT NULL
+                  AND (
+                    source_payload ? 'noticeId'
+                    OR source_payload ? 'notice_id'
+                    OR ui_link ILIKE '%%sam.gov%%'
+                    OR description_url ILIKE '%%sam.gov%%'
+                  );
+                """
+            )
+            return int(cur.fetchone()[0])
+
+
 def invoke_upsert_lambda(
     function_name: str,
     records: List[Dict[str, Any]],
@@ -657,6 +977,8 @@ def update_data_freshness(
     source_mode: str,
     record_count: int,
     source_url: str,
+    freshness_sla_hours: int = 6,
+    notes: str = "Live scheduler completed.",
 ) -> None:
     import psycopg2
 
@@ -672,7 +994,7 @@ def update_data_freshness(
                   last_attempted_sync_at, sync_status, record_count, freshness_sla_hours,
                   source_url, notes
                 )
-                VALUES (%s, %s, %s, now(), now(), 'ready', %s, 6, %s, 'Live scheduler completed.')
+                VALUES (%s, %s, %s, now(), now(), 'ready', %s, %s, %s, %s)
                 ON CONFLICT (source_system, dataset_name)
                 DO UPDATE SET
                   source_mode = EXCLUDED.source_mode,
@@ -680,11 +1002,12 @@ def update_data_freshness(
                   last_attempted_sync_at = EXCLUDED.last_attempted_sync_at,
                   sync_status = 'ready',
                   record_count = EXCLUDED.record_count,
+                  freshness_sla_hours = EXCLUDED.freshness_sla_hours,
                   source_url = EXCLUDED.source_url,
                   notes = EXCLUDED.notes,
                   updated_at = now();
                 """,
-                (source_system, dataset_name, source_mode, record_count, source_url),
+                (source_system, dataset_name, source_mode, record_count, freshness_sla_hours, source_url, notes),
             )
 
 
@@ -972,6 +1295,207 @@ def _lambda_client() -> Any:
 def _chunk_by_count(records: List[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, Any]]]:
     for index in range(0, len(records), size):
         yield records[index : index + size]
+
+
+def _payload_summary_text(source_payload: Mapping[str, Any]) -> str:
+    fragments: List[str] = []
+    for key in (
+        "descriptionText",
+        "description_text",
+        "synopsis",
+        "summary",
+        "requirements",
+        "additionalInfo",
+        "typeOfSetAsideDescription",
+    ):
+        value = source_payload.get(key)
+        if isinstance(value, str) and not _looks_like_url(value):
+            fragments.append(value)
+    point_of_contact = source_payload.get("pointOfContact")
+    if isinstance(point_of_contact, list):
+        fragments.extend(str(item.get("fullName") or item.get("title") or "") for item in point_of_contact if isinstance(item, Mapping))
+    return _normalize_text("\n".join(fragments))
+
+
+def _document_urls(row: Mapping[str, Any], source_payload: Mapping[str, Any]) -> List[str]:
+    candidates: List[Any] = [row.get("description_url")]
+    candidates.extend(row.get("resource_links") or [])
+    candidates.extend(_string_list(source_payload.get("resourceLinks")))
+    candidates.extend(_string_list(source_payload.get("links")))
+
+    urls: List[str] = []
+    for candidate in candidates:
+        url = _safe_document_url(candidate)
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _fetch_document_text(url: str, api_key: Optional[str]) -> Dict[str, Any]:
+    request_url = _append_api_key_for_sam_api(url, api_key)
+    headers = {
+        "Accept": "application/json, text/html, text/plain;q=0.9, */*;q=0.5",
+        "User-Agent": "GovConCaptureOS/1.0",
+    }
+    if api_key:
+        headers["X-Api-Key"] = api_key
+    source = {"type": "document", "url": url, "status": "attempted"}
+    try:
+        request = urllib.request.Request(request_url, headers=headers, method="GET")
+        with urllib.request.urlopen(request, timeout=DEFAULT_DOCUMENT_FETCH_TIMEOUT_SECONDS) as response:
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            body = response.read(DEFAULT_DOCUMENT_FETCH_MAX_BYTES + 1)
+        truncated = len(body) > DEFAULT_DOCUMENT_FETCH_MAX_BYTES
+        body = body[:DEFAULT_DOCUMENT_FETCH_MAX_BYTES]
+        text = _decode_document_body(body, content_type)
+        source.update({"status": "read", "content_type": content_type or "unknown", "chars": len(text), "truncated": truncated})
+        return {"text": text[:DEFAULT_ENRICHMENT_MAX_TEXT_CHARS], "source": source}
+    except Exception as exc:
+        LOGGER.warning("Could not fetch SAM.gov document %s: %s", url, exc)
+        source.update({"status": "failed", "error": str(exc)[:180]})
+        return {"text": "", "source": source}
+
+
+def _decode_document_body(body: bytes, content_type: str) -> str:
+    if not body or body.startswith(b"%PDF"):
+        return ""
+    text = body.decode("utf-8", "replace")
+    if content_type == "application/json" or text.lstrip().startswith(("{", "[")):
+        try:
+            parsed = json.loads(text)
+            return _normalize_text(" ".join(_json_text_fragments(parsed)))
+        except json.JSONDecodeError:
+            return _normalize_text(text)
+    if content_type in {"text/html", "application/xhtml+xml"} or "<html" in text[:500].lower():
+        return _normalize_text(_strip_html(text))
+    if content_type.startswith("text/") or content_type in {"application/xml", "application/octet-stream", ""}:
+        return _normalize_text(text)
+    return ""
+
+
+def _json_text_fragments(value: Any, depth: int = 0) -> List[str]:
+    if depth > 5:
+        return []
+    if isinstance(value, str):
+        return [] if _looks_like_url(value) else [value]
+    if isinstance(value, list):
+        fragments: List[str] = []
+        for item in value[:50]:
+            fragments.extend(_json_text_fragments(item, depth + 1))
+        return fragments
+    if isinstance(value, Mapping):
+        fragments = []
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if key_text in {"url", "href", "filename", "resourceurl"}:
+                continue
+            fragments.extend(_json_text_fragments(item, depth + 1))
+        return fragments
+    return []
+
+
+def _safe_document_url(value: Any) -> Optional[str]:
+    url = _clean_str(value)
+    if not url or not _looks_like_url(url):
+        return None
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https":
+        return None
+    if not any(host == allowed or host.endswith(f".{allowed}") for allowed in _ALLOWED_DOCUMENT_HOSTS):
+        return None
+    return url
+
+
+def _append_api_key_for_sam_api(url: str, api_key: Optional[str]) -> str:
+    if not api_key:
+        return url
+    parsed = urllib.parse.urlparse(url)
+    if parsed.hostname != "api.sam.gov":
+        return url
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if any(key == "api_key" for key, _ in query):
+        return url
+    query.append(("api_key", api_key))
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query)))
+
+
+def _strip_html(text: str) -> str:
+    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    return html.unescape(text)
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(str(text))).strip()
+
+
+def _looks_like_url(value: str) -> bool:
+    return value.strip().lower().startswith(("http://", "https://"))
+
+
+def _deterministic_text_embedding(text: str, row: Mapping[str, Any]) -> List[float]:
+    values = [0.0] * VECTOR_DIMENSION
+    tokens = _TOKEN_RE.findall(text.lower())
+    tokens.extend(
+        f"{label}:{value}".lower()
+        for label, value in (
+            ("naics", row.get("naics_code")),
+            ("psc", row.get("psc_code")),
+            ("agency", row.get("funding_agency_code")),
+            ("setaside", row.get("set_aside_code")),
+        )
+        if value
+    )
+    if not tokens:
+        raise IngestError("Cannot build embedding from empty enrichment text.")
+    for token in tokens[:8000]:
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        index = int.from_bytes(digest[:4], "big") % VECTOR_DIMENSION
+        sign = -1.0 if digest[4] & 1 else 1.0
+        weight = 1.8 if ":" in token else 1.0
+        values[index] += sign * weight
+    return _normalize_vector(values)
+
+
+def _bedrock_embedding(text: str) -> List[float]:
+    import boto3
+    from botocore.config import Config
+
+    model_id = os.getenv("BEDROCK_EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v1")
+    client = boto3.client("bedrock-runtime", config=Config(connect_timeout=3, read_timeout=20, retries={"max_attempts": 2}))
+    response = client.invoke_model(
+        modelId=model_id,
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps({"inputText": text[:DEFAULT_ENRICHMENT_MAX_TEXT_CHARS]}).encode("utf-8"),
+    )
+    payload = json.loads(response["body"].read().decode("utf-8"))
+    embedding = payload.get("embedding")
+    if not isinstance(embedding, list):
+        raise IngestError(f"Bedrock embedding model {model_id} returned no embedding.")
+    if len(embedding) != VECTOR_DIMENSION:
+        raise IngestError(f"Bedrock embedding dimension {len(embedding)} does not match pgvector dimension {VECTOR_DIMENSION}.")
+    return [float(value) for value in embedding]
+
+
+def _normalize_vector(values: List[float]) -> List[float]:
+    norm = math.sqrt(sum(value * value for value in values))
+    if norm == 0:
+        raise IngestError("Cannot normalize zero embedding vector.")
+    return [value / norm for value in values]
+
+
+def _vector_literal(values: List[float]) -> str:
+    if len(values) != VECTOR_DIMENSION:
+        raise IngestError(f"Embedding dimension {len(values)} does not match pgvector dimension {VECTOR_DIMENSION}.")
+    return "[" + ",".join(f"{value:.6f}" for value in values) + "]"
+
+
+def _lambda_time_available(context: Any, reserve_seconds: float) -> bool:
+    if context is None or not hasattr(context, "get_remaining_time_in_millis"):
+        return True
+    return context.get_remaining_time_in_millis() / 1000.0 > reserve_seconds
 
 
 def _redacted(params: Mapping[str, Any]) -> Dict[str, Any]:

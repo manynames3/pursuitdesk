@@ -9,6 +9,8 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 SCHEDULE_EXPRESSION="${GSA_INGEST_SCHEDULE_EXPRESSION:-rate(6 hours)}"
 LOOKBACK_DAYS="${GSA_INGEST_LOOKBACK_DAYS:-1}"
 MAX_PAGES="${GSA_INGEST_MAX_PAGES:-2}"
+ENRICHMENT_BATCH_LIMIT="${SAM_ENRICHMENT_BATCH_LIMIT:-10}"
+USASPENDING_MAX_PAGES="${USASPENDING_AWARDS_MAX_PAGES:-5}"
 BACKFILL_DAYS="${GSA_BACKFILL_DAYS:-30}"
 BACKFILL_MAX_PAGES="${GSA_BACKFILL_MAX_PAGES:-10}"
 
@@ -62,11 +64,18 @@ enable_gsa_ingest_schedule = true
 gsa_ingest_schedule_expression = "$SCHEDULE_EXPRESSION"
 gsa_ingest_lookback_days = $LOOKBACK_DAYS
 gsa_ingest_max_pages = $MAX_PAGES
+enable_sam_enrichment_schedule = true
+sam_enrichment_batch_limit = $ENRICHMENT_BATCH_LIMIT
+enable_usaspending_awards_schedule = true
+usaspending_awards_max_pages = $USASPENDING_MAX_PAGES
 EOF
 
 terraform -chdir="$TF_DIR" apply -auto-approve
 
 INGEST_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["ingest"])')"
+UPSERT_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["upsert"])')"
+AWARDS_INGEST_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["awards_ingest"])')"
+AWARDS_UPSERT_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["awards_upsert"])')"
 
 cat >/tmp/captureos-sam-backfill-event.json <<EOF
 {
@@ -88,4 +97,45 @@ aws lambda invoke \
   /tmp/captureos-sam-backfill-response.json >/dev/null
 
 cat /tmp/captureos-sam-backfill-response.json
+printf '\n'
+
+cat >/tmp/captureos-sam-enrichment-event.json <<EOF
+{
+  "source": "manual.backfill",
+  "dataset": "sam_opportunity_enrichment",
+  "mode": "enrich_sam_opportunity_embeddings",
+  "limit": $ENRICHMENT_BATCH_LIMIT,
+  "fetch_documents": true,
+  "documents_per_opportunity": 1
+}
+EOF
+
+aws lambda invoke \
+  --region "$AWS_REGION" \
+  --function-name "$UPSERT_FUNCTION" \
+  --cli-binary-format raw-in-base64-out \
+  --payload file:///tmp/captureos-sam-enrichment-event.json \
+  /tmp/captureos-sam-enrichment-response.json >/dev/null
+
+cat /tmp/captureos-sam-enrichment-response.json
+printf '\n'
+
+cat >/tmp/captureos-usaspending-awards-event.json <<EOF
+{
+  "source": "manual.backfill",
+  "dataset": "usaspending_contract_awards",
+  "lookback_days": 365,
+  "max_pages": $USASPENDING_MAX_PAGES,
+  "upsert_lambda_name": "$AWARDS_UPSERT_FUNCTION"
+}
+EOF
+
+aws lambda invoke \
+  --region "$AWS_REGION" \
+  --function-name "$AWARDS_INGEST_FUNCTION" \
+  --cli-binary-format raw-in-base64-out \
+  --payload file:///tmp/captureos-usaspending-awards-event.json \
+  /tmp/captureos-usaspending-awards-response.json >/dev/null
+
+cat /tmp/captureos-usaspending-awards-response.json
 printf '\nLive SAM.gov ingestion is enabled. Secret ARN is stored in %s/live_ingest.auto.tfvars.\n' "$TF_DIR"

@@ -115,6 +115,29 @@ variable "lambda_functions" {
       }
     }
 
+    awards_ingest = {
+      package_path = "../../dist/captureos_ingest.zip"
+      handler      = "src.usaspending_awards_ingest.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 128
+      timeout      = 90
+      vpc_enabled  = false
+      environment = {
+        LOG_LEVEL = "INFO"
+      }
+    }
+
+    awards_upsert = {
+      package_path = "../../dist/captureos_ingest.zip"
+      handler      = "src.usaspending_awards_ingest.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 128
+      timeout      = 90
+      environment = {
+        LOG_LEVEL = "INFO"
+      }
+    }
+
     resolver = {
       package_path = "../../dist/captureos_resolver.zip"
       handler      = "src.entity_resolver_lambda.lambda_handler"
@@ -170,6 +193,23 @@ variable "bedrock_model_id" {
   description = "Bedrock model ID used by the entity resolver. Override if your account uses a regional inference profile."
   type        = string
   default     = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+}
+
+variable "bedrock_embedding_model_id" {
+  description = "Bedrock text embedding model for SAM.gov SOW enrichment when sam_embedding_provider is bedrock."
+  type        = string
+  default     = "amazon.titan-embed-text-v1"
+}
+
+variable "sam_embedding_provider" {
+  description = "Embedding provider for SAM.gov opportunity enrichment. deterministic is no-cost; bedrock uses the configured embedding model."
+  type        = string
+  default     = "deterministic"
+
+  validation {
+    condition     = contains(["deterministic", "bedrock"], var.sam_embedding_provider)
+    error_message = "sam_embedding_provider must be deterministic or bedrock."
+  }
 }
 
 variable "auth_required" {
@@ -266,6 +306,48 @@ variable "gsa_ingest_max_pages" {
   description = "Maximum SAM.gov pages to read per scheduled run to keep demo costs bounded."
   type        = number
   default     = 2
+}
+
+variable "enable_sam_enrichment_schedule" {
+  description = "Create a low-cost EventBridge Scheduler job to enrich live SAM.gov opportunities with SOW text and pgvector embeddings."
+  type        = bool
+  default     = false
+}
+
+variable "sam_enrichment_schedule_expression" {
+  description = "EventBridge Scheduler expression for SAM.gov opportunity document enrichment."
+  type        = string
+  default     = "rate(12 hours)"
+}
+
+variable "sam_enrichment_batch_limit" {
+  description = "Maximum active SAM.gov opportunities to enrich per scheduled run."
+  type        = number
+  default     = 10
+}
+
+variable "enable_usaspending_awards_schedule" {
+  description = "Create a low-cost EventBridge Scheduler job for USAspending contract award ingest."
+  type        = bool
+  default     = false
+}
+
+variable "usaspending_awards_schedule_expression" {
+  description = "EventBridge Scheduler expression for USAspending award ingest."
+  type        = string
+  default     = "rate(24 hours)"
+}
+
+variable "usaspending_awards_lookback_days" {
+  description = "Number of award start-date days the scheduled USAspending ingest scans each run."
+  type        = number
+  default     = 30
+}
+
+variable "usaspending_awards_max_pages" {
+  description = "Maximum USAspending pages to read per scheduled run."
+  type        = number
+  default     = 5
 }
 
 variable "enable_cloudwatch_alarms" {

@@ -50,6 +50,118 @@
         <button id="refresh" type="button">Apply filters</button>
       </section>
 
+      <section class="consultant-workspace" aria-label="Consultant operating dashboard">
+        <div class="section-title">
+          <span>Consultant workspace</span>
+          <div class="header-actions compact-actions">
+            <button id="demo-flow-start" class="secondary compact-button" type="button">Demo flow</button>
+            <button id="export-client-report" class="secondary compact-button" type="button">Client report</button>
+          </div>
+        </div>
+        <div class="positioning-band">
+          <strong id="positioning-headline">GovCon consulting delivery platform for small-business advisors</strong>
+          <span id="positioning-promise">Add a client, get readiness, get top pursuits, export a client report.</span>
+        </div>
+        <div id="demo-flow" class="demo-flow" aria-label="Demo flow"></div>
+        <form id="client-intake" class="intake-form" aria-label="Client intake wizard">
+          <label>
+            Company
+            <input id="intake-company" required placeholder="Acme Precision Manufacturing" />
+          </label>
+          <label>
+            Contact email
+            <input id="intake-email" required type="email" placeholder="owner@example.com" />
+          </label>
+          <label>
+            UEI
+            <input id="intake-uei" maxlength="12" placeholder="12-char UEI" />
+          </label>
+          <label>
+            CAGE
+            <input id="intake-cage" maxlength="5" placeholder="1ABC2" />
+          </label>
+          <label>
+            Target NAICS
+            <input id="intake-naics" placeholder="336413, 332710" />
+          </label>
+          <label>
+            Certifications
+            <input id="intake-set-asides" placeholder="SDVOSB, WOSB, HUBZone" />
+          </label>
+          <button id="intake-submit" type="submit">Add client</button>
+        </form>
+        <div class="portfolio-grid">
+          <div>
+            <span>Clients</span>
+            <strong id="portfolio-client-count">--</strong>
+          </div>
+          <div>
+            <span>Prime-ready</span>
+            <strong id="portfolio-prime-ready">--</strong>
+          </div>
+          <div>
+            <span>Tracked pursuits</span>
+            <strong id="portfolio-pipeline">--</strong>
+          </div>
+          <div>
+            <span>Average readiness</span>
+            <strong id="portfolio-readiness">--</strong>
+          </div>
+        </div>
+        <div class="dashboard-grid three">
+          <section>
+            <h3>Client portfolio</h3>
+            <div id="client-cards" class="stack"></div>
+          </section>
+          <section>
+            <h3>Readiness and gaps</h3>
+            <div class="readiness-score">
+              <strong id="readiness-score">--</strong>
+              <span id="readiness-label">Client readiness pending</span>
+            </div>
+            <div id="readiness-gaps" class="stack"></div>
+          </section>
+          <section>
+            <h3>Recommended pursuits</h3>
+            <div id="recommended-opps" class="stack"></div>
+          </section>
+        </div>
+        <div class="dashboard-grid three">
+          <section>
+            <h3>Consultant deliverables</h3>
+            <div id="consultant-deliverables" class="stack"></div>
+          </section>
+          <section>
+            <h3>Client portal and reminders</h3>
+            <div id="client-portal" class="stack"></div>
+            <form id="reminder-form" class="inline-form">
+              <input id="reminder-title" placeholder="Follow up on capability statement" />
+              <input id="reminder-due" type="date" />
+              <button class="secondary compact-button" type="submit">Add reminder</button>
+            </form>
+          </section>
+          <section>
+            <h3>Trust posture</h3>
+            <div id="trust-posture" class="stack"></div>
+          </section>
+        </div>
+        <div class="dashboard-grid">
+          <section>
+            <h3>Incumbents and recompetes</h3>
+            <div id="recompete-signals" class="stack"></div>
+          </section>
+          <section>
+            <h3>White-label settings</h3>
+            <form id="white-label-form" class="white-label-form">
+              <input id="brand-name" placeholder="Advisory firm name" />
+              <input id="brand-color" placeholder="#0f766e" />
+              <input id="brand-email" type="email" placeholder="advisor@example.com" />
+              <button class="secondary compact-button" type="submit">Save brand</button>
+            </form>
+          </section>
+        </div>
+      </section>
+
       <section class="layout">
         <aside class="opportunity-list" aria-label="Active opportunities">
           <div class="section-title">
@@ -104,6 +216,22 @@
               <strong id="profile-fit">--</strong>
             </div>
           </div>
+
+          <section class="action-band">
+            <div>
+              <span>Recommended action</span>
+              <strong id="recommended-action">--</strong>
+              <p id="recommended-rationale">Select an opportunity to generate bid/no-bid guidance.</p>
+            </div>
+            <div>
+              <span>Capture task plan</span>
+              <div id="capture-tasks" class="mini-list"></div>
+            </div>
+            <div>
+              <span>Opportunity deliverables</span>
+              <div id="opportunity-deliverables" class="mini-list"></div>
+            </div>
+          </section>
 
           <section class="profile-band">
             <div>

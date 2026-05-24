@@ -170,12 +170,13 @@ const els = {
   proposalSectionCards: document.querySelector("#proposal-section-cards"),
   proposalGenerate: document.querySelector("#proposal-generate"),
   proposalCopy: document.querySelector("#proposal-copy"),
-  proposalDownload: document.querySelector("#proposal-download"),
   proposalLoading: document.querySelector("#proposal-loading"),
   proposalLoadingStatus: document.querySelector("#proposal-loading-status"),
   proposalOutput: document.querySelector("#proposal-output"),
   proposalError: document.querySelector("#proposal-error"),
   exportBrief: document.querySelector("#export-brief"),
+  proposalDownloadDocx: document.querySelector("#proposal-download-docx"),
+  proposalDownloadPdf: document.querySelector("#proposal-download-pdf"),
   exportClientReport: document.querySelector("#export-client-report"),
   demoFlowStart: document.querySelector("#demo-flow-start"),
   positioningHeadline: document.querySelector("#positioning-headline"),
@@ -268,7 +269,8 @@ els.proposalSectionCards.addEventListener("click", (event) => {
 });
 els.proposalGenerate.addEventListener("click", generateProposalDraft);
 els.proposalCopy.addEventListener("click", copyProposalDraft);
-els.proposalDownload.addEventListener("click", downloadProposalDraft);
+els.proposalDownloadDocx.addEventListener("click", downloadProposalDocx);
+els.proposalDownloadPdf.addEventListener("click", downloadProposalPdf);
 els.proposalOutput.addEventListener("input", syncProposalDraftActions);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.proposalWriterOverlay.hidden) {
@@ -612,7 +614,8 @@ function setProposalGenerating(isGenerating, statusText = "Architecting Complian
     card.disabled = isGenerating;
   });
   els.proposalCopy.disabled = isGenerating || !els.proposalOutput.value.trim();
-  els.proposalDownload.disabled = isGenerating || !els.proposalOutput.value.trim();
+  els.proposalDownloadDocx.disabled = isGenerating || !els.proposalOutput.value.trim();
+  els.proposalDownloadPdf.disabled = isGenerating || !els.proposalOutput.value.trim();
   els.proposalLoading.hidden = !isGenerating;
   els.proposalOutput.hidden = isGenerating;
   els.proposalLoadingStatus.textContent = statusText;
@@ -629,7 +632,8 @@ function setProposalDraft(text) {
 function syncProposalDraftActions() {
   const hasDraft = Boolean(els.proposalOutput.value.trim());
   els.proposalCopy.disabled = !hasDraft;
-  els.proposalDownload.disabled = !hasDraft;
+  els.proposalDownloadDocx.disabled = !hasDraft;
+  els.proposalDownloadPdf.disabled = !hasDraft;
 }
 
 function setProposalError(message) {
@@ -646,10 +650,25 @@ async function copyProposalDraft() {
   }, 1600);
 }
 
-function downloadProposalDraft() {
+function downloadProposalDocx() {
   if (!els.proposalOutput.value.trim()) return;
+  downloadBlob(
+    createDocxBlob(els.proposalOutput.value),
+    `${proposalExportFilename()}.docx`
+  );
+}
+
+function downloadProposalPdf() {
+  if (!els.proposalOutput.value.trim()) return;
+  downloadBlob(
+    createPdfBlob(els.proposalOutput.value),
+    `${proposalExportFilename()}.pdf`
+  );
+}
+
+function proposalExportFilename() {
   const section = selectedProposalSection.replace(/_/g, "-");
-  downloadText(els.proposalOutput.value, `proposal-${section}-${currentOpportunityId}.md`);
+  return safeFilename(`proposal-${section}-${currentOpportunityId || "draft"}`);
 }
 
 function renderLocalProposalDraft(payload) {
@@ -1756,8 +1775,295 @@ function renderLocalClientReport(workspace) {
   return lines.join("\n");
 }
 
+function createDocxBlob(markdown) {
+  const files = {
+    "[Content_Types].xml": [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+      '<Default Extension="xml" ContentType="application/xml"/>',
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>',
+      '</Types>',
+    ].join(""),
+    "_rels/.rels": [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>',
+      '</Relationships>',
+    ].join(""),
+    "word/document.xml": renderDocxDocument(markdown),
+  };
+  return new Blob([createZip(files)], {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  });
+}
+
+function renderDocxDocument(markdown) {
+  const paragraphs = proposalMarkdownBlocks(markdown).map((block) => {
+    if (block.type === "blank") return "<w:p/>";
+    if (block.type === "heading") {
+      const size = block.level === 1 ? 32 : block.level === 2 ? 28 : 24;
+      return docxParagraph(block.text, { bold: true, size, spacingBefore: 160, spacingAfter: 80 });
+    }
+    if (block.type === "bullet") {
+      return docxParagraph(`• ${block.text}`, { size: 22, indentLeft: 360, indentHanging: 180 });
+    }
+    return docxParagraph(block.text, { size: 22, spacingAfter: 80 });
+  }).join("");
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">',
+    '<w:body>',
+    paragraphs,
+    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>',
+    '</w:body>',
+    '</w:document>',
+  ].join("");
+}
+
+function docxParagraph(text, options = {}) {
+  const runProps = [
+    options.bold ? "<w:b/>" : "",
+    `<w:sz w:val="${Number(options.size || 22)}"/>`,
+  ].join("");
+  const paragraphProps = [
+    options.spacingBefore || options.spacingAfter
+      ? `<w:spacing w:before="${Number(options.spacingBefore || 0)}" w:after="${Number(options.spacingAfter || 0)}"/>`
+      : "",
+    options.indentLeft
+      ? `<w:ind w:left="${Number(options.indentLeft)}" w:hanging="${Number(options.indentHanging || 0)}"/>`
+      : "",
+  ].join("");
+  return `<w:p>${paragraphProps ? `<w:pPr>${paragraphProps}</w:pPr>` : ""}<w:r><w:rPr>${runProps}</w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r></w:p>`;
+}
+
+function createPdfBlob(markdown) {
+  return new Blob([renderPdf(markdown)], { type: "application/pdf" });
+}
+
+function renderPdf(markdown) {
+  const pages = paginatePdf(markdown);
+  const objects = [null, "", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>"];
+  const pageIds = [];
+
+  pages.forEach((page) => {
+    const content = page.map((line) => (
+      `BT /${line.bold ? "F2" : "F1"} ${line.size} Tf ${line.x} ${line.y} Td (${escapePdfText(line.text)}) Tj ET`
+    )).join("\n");
+    const pageId = objects.length;
+    const contentId = pageId + 1;
+    pageIds.push(pageId);
+    objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>`;
+    objects[contentId] = `<< /Length ${content.length} >>\nstream\n${content}\nendstream`;
+  });
+
+  objects[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+  objects[2] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
+
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (let index = 1; index < objects.length; index += 1) {
+    offsets[index] = pdf.length;
+    pdf += `${index} 0 obj\n${objects[index]}\nendobj\n`;
+  }
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length}\n0000000000 65535 f \n`;
+  for (let index = 1; index < objects.length; index += 1) {
+    pdf += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return pdf;
+}
+
+function paginatePdf(markdown) {
+  const pages = [[]];
+  const margin = 54;
+  const maxWidth = 504;
+  let y = 742;
+
+  const nextPage = () => {
+    pages.push([]);
+    y = 742;
+  };
+  const addLine = (text, style) => {
+    if (y < margin + style.size) nextPage();
+    pages[pages.length - 1].push({ text, x: style.x, y, size: style.size, bold: style.bold });
+    y -= Math.ceil(style.size * 1.38);
+  };
+
+  proposalMarkdownBlocks(markdown).forEach((block) => {
+    if (block.type === "blank") {
+      y -= 8;
+      if (y < margin) nextPage();
+      return;
+    }
+    const style = pdfBlockStyle(block);
+    if (block.type === "heading") y -= 6;
+    const prefix = block.type === "bullet" ? "- " : "";
+    wrapPdfText(`${prefix}${block.text}`, Math.floor(maxWidth / (style.size * 0.52))).forEach((line) => addLine(line, style));
+    if (block.type === "heading") y -= 4;
+  });
+
+  return pages.length && pages[0].length ? pages : [[{ text: "Proposal draft", x: margin, y: 742, size: 12, bold: true }]];
+}
+
+function pdfBlockStyle(block) {
+  if (block.type === "heading") {
+    if (block.level === 1) return { x: 54, size: 18, bold: true };
+    if (block.level === 2) return { x: 54, size: 15, bold: true };
+    return { x: 54, size: 13, bold: true };
+  }
+  if (block.type === "bullet") return { x: 70, size: 10, bold: false };
+  return { x: 54, size: 10, bold: false };
+}
+
+function proposalMarkdownBlocks(markdown) {
+  return String(markdown || "").split(/\r?\n/).map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return { type: "blank", text: "" };
+    const heading = /^(#{1,3})\s+(.+)$/.exec(trimmed);
+    if (heading) return { type: "heading", level: heading[1].length, text: cleanMarkdownText(heading[2]) };
+    const bullet = /^[-*]\s+(.+)$/.exec(trimmed);
+    if (bullet) return { type: "bullet", text: cleanMarkdownText(bullet[1]) };
+    return { type: "paragraph", text: cleanMarkdownText(trimmed.replace(/^>\s?/, "")) };
+  });
+}
+
+function cleanMarkdownText(text) {
+  return String(text || "")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
+    .replace(/[*_`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function wrapPdfText(text, maxChars) {
+  const words = sanitizePdfText(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = "";
+  words.forEach((word) => {
+    if (word.length > maxChars) {
+      if (line) {
+        lines.push(line);
+        line = "";
+      }
+      for (let index = 0; index < word.length; index += maxChars) {
+        lines.push(word.slice(index, index + maxChars));
+      }
+      return;
+    }
+    const next = line ? `${line} ${word}` : word;
+    if (next.length > maxChars && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  });
+  if (line) lines.push(line);
+  return lines.length ? lines : [""];
+}
+
+function createZip(files) {
+  const encoder = new TextEncoder();
+  const entries = Object.entries(files).map(([name, content]) => {
+    const nameBytes = encoder.encode(name);
+    const dataBytes = encoder.encode(content);
+    return { nameBytes, dataBytes, crc: crc32(dataBytes) };
+  });
+  const localChunks = [];
+  const centralChunks = [];
+  let offset = 0;
+
+  entries.forEach((entry) => {
+    const localHeader = concatBytes(
+      u32(0x04034b50), u16(20), u16(0), u16(0), u16(0), u16(0),
+      u32(entry.crc), u32(entry.dataBytes.length), u32(entry.dataBytes.length),
+      u16(entry.nameBytes.length), u16(0), entry.nameBytes
+    );
+    localChunks.push(localHeader, entry.dataBytes);
+    centralChunks.push(concatBytes(
+      u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(0), u16(0),
+      u32(entry.crc), u32(entry.dataBytes.length), u32(entry.dataBytes.length),
+      u16(entry.nameBytes.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset), entry.nameBytes
+    ));
+    offset += localHeader.length + entry.dataBytes.length;
+  });
+
+  const central = concatBytes(...centralChunks);
+  const end = concatBytes(
+    u32(0x06054b50), u16(0), u16(0), u16(entries.length), u16(entries.length),
+    u32(central.length), u32(offset), u16(0)
+  );
+  return concatBytes(...localChunks, central, end);
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ byte) & 0xff];
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+const CRC32_TABLE = Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  }
+  return value >>> 0;
+});
+
+function u16(value) {
+  return new Uint8Array([value & 0xff, (value >>> 8) & 0xff]);
+}
+
+function u32(value) {
+  return new Uint8Array([value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff]);
+}
+
+function concatBytes(...chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return output;
+}
+
+function sanitizePdfText(text) {
+  return String(text || "")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, "-")
+    .replace(/•/g, "-")
+    .replace(/[^\x20-\x7e]/g, " ");
+}
+
+function escapePdfText(text) {
+  return sanitizePdfText(text).replace(/[\\()]/g, "\\$&");
+}
+
+function escapeXml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => {
+    const escapes = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" };
+    return escapes[char];
+  });
+}
+
+function safeFilename(value) {
+  return String(value || "proposal-draft").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 90) || "proposal-draft";
+}
+
 function downloadText(text, filename) {
   const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  downloadBlob(blob, filename);
+}
+
+function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

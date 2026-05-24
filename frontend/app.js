@@ -158,6 +158,7 @@ const els = {
   refresh: document.querySelector("#refresh"),
   trackGo: document.querySelector("#track-go"),
   trackNoGo: document.querySelector("#track-no-go"),
+  trackClear: document.querySelector("#track-clear"),
   decisionStatus: document.querySelector("#decision-status"),
   decisionSummary: document.querySelector("#decision-summary"),
   proposalWriterOpen: document.querySelector("#proposal-writer-open"),
@@ -256,6 +257,7 @@ els.refresh.addEventListener("click", () => loadOpportunities({ append: false })
 els.loadMore.addEventListener("click", () => loadOpportunities({ append: true }));
 els.trackGo.addEventListener("click", () => updateWorkflow("go"));
 els.trackNoGo.addEventListener("click", () => updateWorkflow("no_go"));
+els.trackClear.addEventListener("click", () => updateWorkflow("undecided"));
 els.proposalWriterOpen.addEventListener("click", openProposalWriter);
 els.proposalWriterBackdrop.addEventListener("click", closeProposalWriter);
 els.proposalWriterClose.addEventListener("click", closeProposalWriter);
@@ -425,12 +427,18 @@ function findLoadedOpportunity(opportunityId) {
 
 async function updateWorkflow(goNoGo) {
   if (!currentOpportunityId) return;
+  const isGo = goNoGo === "go";
+  const isNoGo = goNoGo === "no_go";
   const payload = {
     go_no_go: goNoGo,
-    status: goNoGo === "go" ? "qualifying" : "no_bid",
-    priority: goNoGo === "go" ? "high" : "low",
-    stage: goNoGo === "go" ? "Gate 2: Teaming" : "Closed: No-bid",
-    decision_rationale: goNoGo === "go" ? "Advisor marked this opportunity as Go." : "Advisor marked this opportunity as No-go.",
+    status: isGo ? "qualifying" : isNoGo ? "no_bid" : "tracking",
+    priority: isGo ? "high" : isNoGo ? "low" : "medium",
+    stage: isGo ? "Gate 2: Teaming" : isNoGo ? "Closed: No-bid" : "Qualification",
+    decision_rationale: isGo
+      ? "Advisor marked this opportunity as Go."
+      : isNoGo
+        ? "Advisor marked this opportunity as No-go."
+        : "Advisor cleared the Go/No-go decision.",
   };
   const optimisticWorkflow = { ...(currentAnalysis?.workflow || {}), ...payload };
   applyWorkflowState(optimisticWorkflow);
@@ -1087,7 +1095,7 @@ function renderDecisionState(workflow = {}) {
   const label = decisionLabel(decision);
   const isDecided = decision !== "undecided";
   const statusText = decisionSavePending
-    ? `Saving ${label} decision...`
+    ? isDecided ? `Saving ${label} decision...` : "Clearing decision..."
     : isDecided
       ? `Advisor decision: ${label}`
       : "Advisor decision pending";
@@ -1105,6 +1113,8 @@ function renderDecisionState(workflow = {}) {
   els.trackNoGo.setAttribute("aria-pressed", String(decision === "no_go"));
   els.trackGo.disabled = decisionSavePending || !currentOpportunityId;
   els.trackNoGo.disabled = decisionSavePending || !currentOpportunityId;
+  els.trackClear.hidden = !isDecided;
+  els.trackClear.disabled = decisionSavePending || !currentOpportunityId;
 }
 
 function setDecisionSavePending(isPending) {

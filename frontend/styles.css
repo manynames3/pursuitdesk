@@ -206,6 +206,21 @@ button.decision-no-go.is-active {
   color: white;
 }
 
+button.decision-clear {
+  border-color: #cbd5e1;
+  color: #475569;
+}
+
+button.decision-clear:hover {
+  border-color: #64748b;
+  background: #f1f5f9;
+  color: #334155;
+}
+
+button.decision-clear[hidden] {
+  display: none;
+}
+
 .layout {
   display: grid;
   grid-template-columns: minmax(300px, 390px) minmax(0, 1fr);

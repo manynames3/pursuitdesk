@@ -166,6 +166,7 @@ const els = {
   proposalCopy: document.querySelector("#proposal-copy"),
   proposalDownload: document.querySelector("#proposal-download"),
   proposalLoading: document.querySelector("#proposal-loading"),
+  proposalLoadingStatus: document.querySelector("#proposal-loading-status"),
   proposalOutput: document.querySelector("#proposal-output"),
   proposalError: document.querySelector("#proposal-error"),
   exportBrief: document.querySelector("#export-brief"),
@@ -518,7 +519,7 @@ async function generateProposalDraft() {
   if (!currentOpportunityId) return;
 
   const payload = buildProposalWriterPayload();
-  setProposalGenerating(true);
+  setProposalGenerating(true, "Submitting Sonnet drafting job...");
   setProposalError("");
 
   try {
@@ -527,14 +528,43 @@ async function generateProposalDraft() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
     });
-    setProposalDraft(response.draft || renderLocalProposalDraft(payload));
+    if (response.job_id) {
+      setProposalGenerating(true, "Sonnet is drafting the final narrative...");
+      const job = await pollProposalWriterJob(response.job_id);
+      setProposalDraft(job.draft || renderLocalProposalDraft(payload));
+      setProposalError(job.generation_mode === "bedrock_sonnet" ? "" : "Sonnet did not complete; showing the best available fallback draft.");
+    } else {
+      setProposalDraft(response.draft || renderLocalProposalDraft(payload));
+    }
     setApiStatus("Live API");
   } catch (error) {
     setProposalDraft(renderLocalProposalDraft(payload));
-    setProposalError("Live proposal endpoint is unavailable; showing a local structured draft from the active opportunity context.");
+    setProposalError("Live proposal job did not complete; showing a local structured draft from the active opportunity context.");
   } finally {
     setProposalGenerating(false);
   }
+}
+
+async function pollProposalWriterJob(jobId) {
+  const startedAt = Date.now();
+  const timeoutMs = 330000;
+  let lastStatus = "queued";
+
+  while (Date.now() - startedAt < timeoutMs) {
+    await wait(lastStatus === "queued" ? 1200 : 2500);
+    const job = await fetchJson(`${apiBaseUrl}/api/v1/proposal-writer/jobs/${encodeURIComponent(jobId)}`);
+    lastStatus = job.status || lastStatus;
+    if (lastStatus === "succeeded") {
+      return job;
+    }
+    if (lastStatus === "failed") {
+      throw new Error(job.error || "Proposal Writer job failed");
+    }
+    setProposalGenerating(true, lastStatus === "running"
+      ? "Sonnet is drafting the final narrative..."
+      : "Queued for compliant proposal drafting...");
+  }
+  throw new Error("Proposal Writer job timed out");
 }
 
 function buildProposalWriterPayload() {
@@ -565,7 +595,7 @@ function buildProposalWriterPayload() {
   };
 }
 
-function setProposalGenerating(isGenerating) {
+function setProposalGenerating(isGenerating, statusText = "Architecting Compliant Narrative...") {
   els.proposalGenerate.disabled = isGenerating;
   els.proposalSectionSelect.disabled = isGenerating;
   els.proposalSectionCards.querySelectorAll("[data-proposal-section]").forEach((card) => {
@@ -575,6 +605,7 @@ function setProposalGenerating(isGenerating) {
   els.proposalDownload.disabled = isGenerating || !els.proposalOutput.value.trim();
   els.proposalLoading.hidden = !isGenerating;
   els.proposalOutput.hidden = isGenerating;
+  els.proposalLoadingStatus.textContent = statusText;
   els.proposalGenerate.innerHTML = isGenerating
     ? `<span class="proposal-spinner" aria-hidden="true"></span>Generating...`
     : `<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z" /></svg>Generate Draft`;
@@ -1296,6 +1327,10 @@ async function fetchJson(url, options = {}) {
     throw new Error(`HTTP ${response.status}`);
   }
   return response.json();
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function requestHeaders(headers = {}) {

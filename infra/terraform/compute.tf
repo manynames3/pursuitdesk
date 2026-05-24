@@ -14,6 +14,8 @@ locals {
     DATABASE_URL               = local.database_url
     DATABASE_USER              = var.db_username
     PGVECTOR_SCHEMA            = "capture"
+    PROPOSAL_JOBS_TABLE        = aws_dynamodb_table.proposal_writer_jobs.name
+    PROPOSAL_JOB_TTL_SECONDS   = tostring(var.proposal_job_ttl_seconds)
     JWT_AUDIENCE               = var.jwt_audience
     JWT_ISSUER                 = var.jwt_issuer
     JWT_JWKS_URL               = var.jwt_jwks_url
@@ -110,7 +112,7 @@ resource "aws_iam_role_policy" "lambda_runtime" {
         Resource = "*"
       },
       {
-        Sid    = "InvokeCaptureOsUpsertLambda"
+        Sid    = "InvokeCaptureOsLambdas"
         Effect = "Allow"
         Action = [
           "lambda:InvokeFunction"
@@ -119,8 +121,19 @@ resource "aws_iam_role_policy" "lambda_runtime" {
           "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-upsert",
           "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-awards_upsert",
           "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-subawards_upsert",
-          "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-calc_upsert"
+          "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-calc_upsert",
+          "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-proposal_writer"
         ]
+      },
+      {
+        Sid    = "ReadWriteProposalWriterJobs"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
+        ]
+        Resource = aws_dynamodb_table.proposal_writer_jobs.arn
       }
       ],
       length(compact([var.sam_api_key_secret_arn, var.stripe_api_key_secret_arn, var.stripe_webhook_secret_arn])) > 0 ? [

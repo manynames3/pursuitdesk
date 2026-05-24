@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+from uuid import uuid4
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping
 
@@ -14,16 +16,28 @@ from .api_v1_endpoints import (
     _procurement_decision_disclaimer,
 )
 
+PROPOSAL_JOBS_TABLE = os.getenv("PROPOSAL_JOBS_TABLE", "")
+PROPOSAL_JOB_TTL_SECONDS = int(os.getenv("PROPOSAL_JOB_TTL_SECONDS", "86400"))
+
 
 def lambda_handler(event: Mapping[str, Any], _context: Any) -> Dict[str, Any]:
     """Standalone non-VPC Proposal Writer endpoint for Bedrock model access."""
+    if event.get("action") == "run_proposal_writer_job":
+        return _run_proposal_writer_job(str(event.get("job_id") or ""))
+
     if _request_method(event) == "OPTIONS":
         return _response(204, {})
+
+    if _request_method(event) == "GET":
+        return _get_proposal_writer_job(event)
 
     try:
         payload = ProposalWriterRequest(**_json_body(event))
     except Exception as exc:
         return _response(400, {"detail": "Invalid proposal writer request.", "error": type(exc).__name__})
+
+    if PROPOSAL_JOBS_TABLE:
+        return _submit_proposal_writer_job(event, payload)
 
     result = _generate_proposal_writer_response(payload, _request_context(event))
     body = {
@@ -34,6 +48,180 @@ def lambda_handler(event: Mapping[str, Any], _context: Any) -> Dict[str, Any]:
         "legal_disclaimer": _procurement_decision_disclaimer(),
     }
     return _response(200, body)
+
+
+def _submit_proposal_writer_job(event: Mapping[str, Any], payload: ProposalWriterRequest) -> Dict[str, Any]:
+    job_id = uuid4().hex
+    now = _now_iso()
+    context = _request_context(event)
+    item = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": _ttl_epoch(),
+        "target_section": payload.target_section,
+        "opportunity_id": payload.opportunity_id,
+        "opportunity_title": payload.opportunity_title,
+        "tenant_slug": context.get("tenant_slug"),
+        "payload_json": payload.model_dump_json(),
+        "context_json": json.dumps(context, default=str),
+    }
+    _jobs_table().put_item(Item=item)
+    _invoke_job_worker(job_id)
+    return _response(
+        202,
+        {
+            "job_id": job_id,
+            "status": "queued",
+            "generation_mode": "async_bedrock_sonnet_job",
+            "target_section": payload.target_section,
+            "opportunity_id": payload.opportunity_id,
+            "poll_url": f"/api/v1/proposal-writer/jobs/{job_id}",
+            "submitted_at": now,
+            "legal_disclaimer": _procurement_decision_disclaimer(),
+        },
+    )
+
+
+def _get_proposal_writer_job(event: Mapping[str, Any]) -> Dict[str, Any]:
+    job_id = _job_id_from_event(event)
+    if not job_id:
+        return _response(404, {"detail": "Proposal Writer job not found."})
+    item = _load_job(job_id)
+    if not item:
+        return _response(404, {"detail": "Proposal Writer job not found.", "job_id": job_id})
+    return _response(200, _job_public_payload(item))
+
+
+def _run_proposal_writer_job(job_id: str) -> Dict[str, Any]:
+    if not job_id:
+        return {"ok": False, "error": "missing_job_id"}
+    item = _load_job(job_id)
+    if not item:
+        return {"ok": False, "error": "job_not_found", "job_id": job_id}
+    if item.get("status") == "succeeded":
+        return {"ok": True, "job_id": job_id, "status": "succeeded"}
+
+    _update_job(
+        job_id,
+        {
+            "status": "running",
+            "started_at": _now_iso(),
+            "updated_at": _now_iso(),
+        },
+    )
+    try:
+        payload = ProposalWriterRequest(**json.loads(str(item.get("payload_json") or "{}")))
+        context = json.loads(str(item.get("context_json") or "{}"))
+        result = _generate_proposal_writer_response(payload, context)
+        completed_at = _now_iso()
+        _update_job(
+            job_id,
+            {
+                "status": "succeeded",
+                "updated_at": completed_at,
+                "completed_at": completed_at,
+                "draft": result.get("draft", ""),
+                "generation_mode": result.get("generation_mode", ""),
+                "model_trace_json": json.dumps(_json_safe(result.get("model_trace") or []), default=str),
+                "legal_disclaimer_json": json.dumps(_procurement_decision_disclaimer(), default=str),
+            },
+        )
+        return {"ok": True, "job_id": job_id, "status": "succeeded"}
+    except Exception as exc:
+        failed_at = _now_iso()
+        _update_job(
+            job_id,
+            {
+                "status": "failed",
+                "updated_at": failed_at,
+                "completed_at": failed_at,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        return {"ok": False, "job_id": job_id, "status": "failed", "error": type(exc).__name__}
+
+
+def _jobs_table():
+    import boto3
+
+    return boto3.resource("dynamodb").Table(PROPOSAL_JOBS_TABLE)
+
+
+def _invoke_job_worker(job_id: str) -> None:
+    import boto3
+
+    boto3.client("lambda").invoke(
+        FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
+        InvocationType="Event",
+        Payload=json.dumps({"action": "run_proposal_writer_job", "job_id": job_id}).encode("utf-8"),
+    )
+
+
+def _load_job(job_id: str) -> Dict[str, Any]:
+    response = _jobs_table().get_item(Key={"job_id": job_id}, ConsistentRead=True)
+    return response.get("Item") or {}
+
+
+def _update_job(job_id: str, values: Mapping[str, Any]) -> None:
+    names: Dict[str, str] = {}
+    expression_values: Dict[str, Any] = {}
+    assignments = []
+    for index, (key, value) in enumerate(values.items()):
+        name_key = f"#k{index}"
+        value_key = f":v{index}"
+        names[name_key] = key
+        expression_values[value_key] = value
+        assignments.append(f"{name_key} = {value_key}")
+    _jobs_table().update_item(
+        Key={"job_id": job_id},
+        UpdateExpression="SET " + ", ".join(assignments),
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=expression_values,
+    )
+
+
+def _job_public_payload(item: Mapping[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "job_id": item.get("job_id"),
+        "status": item.get("status"),
+        "target_section": item.get("target_section"),
+        "opportunity_id": item.get("opportunity_id"),
+        "opportunity_title": item.get("opportunity_title"),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "started_at": item.get("started_at"),
+        "completed_at": item.get("completed_at"),
+        "generation_mode": item.get("generation_mode") or "async_bedrock_sonnet_job",
+        "legal_disclaimer": _procurement_decision_disclaimer(),
+    }
+    if item.get("draft"):
+        payload["draft"] = item.get("draft")
+    if item.get("model_trace_json"):
+        payload["model_trace"] = json.loads(str(item.get("model_trace_json")))
+    if item.get("error"):
+        payload["error"] = item.get("error")
+    return payload
+
+
+def _job_id_from_event(event: Mapping[str, Any]) -> str:
+    path_parameters = event.get("pathParameters") or {}
+    if path_parameters.get("job_id"):
+        return str(path_parameters["job_id"])
+    path = str(event.get("rawPath") or event.get("path") or "")
+    marker = "/api/v1/proposal-writer/jobs/"
+    if marker in path:
+        return path.split(marker, 1)[1].strip("/")
+    return ""
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _ttl_epoch() -> int:
+    return int(datetime.now(timezone.utc).timestamp()) + PROPOSAL_JOB_TTL_SECONDS
 
 
 def _json_body(event: Mapping[str, Any]) -> Dict[str, Any]:

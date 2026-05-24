@@ -93,6 +93,15 @@ resource "aws_apigatewayv2_route" "proposal_writer" {
   authorizer_id      = var.enable_api_gateway_jwt_authorizer ? aws_apigatewayv2_authorizer.jwt[0].id : null
 }
 
+resource "aws_apigatewayv2_route" "proposal_writer_job" {
+  api_id = aws_apigatewayv2_api.http.id
+
+  route_key          = "GET /api/v1/proposal-writer/jobs/{job_id}"
+  target             = "integrations/${aws_apigatewayv2_integration.proposal_writer.id}"
+  authorization_type = var.enable_api_gateway_jwt_authorizer ? "JWT" : "NONE"
+  authorizer_id      = var.enable_api_gateway_jwt_authorizer ? aws_apigatewayv2_authorizer.jwt[0].id : null
+}
+
 resource "aws_apigatewayv2_route" "health" {
   api_id = aws_apigatewayv2_api.http.id
 
@@ -134,4 +143,12 @@ resource "aws_lambda_permission" "allow_http_api_proposal_writer" {
   function_name = aws_lambda_function.backend["proposal_writer"].function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/POST/api/v1/proposal-writer"
+}
+
+resource "aws_lambda_permission" "allow_http_api_proposal_writer_job" {
+  statement_id  = "AllowExecutionFromHttpApiProposalWriterJob"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.backend["proposal_writer"].function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/GET/api/v1/proposal-writer/jobs/*"
 }

@@ -97,16 +97,16 @@ variable "lambda_functions" {
       handler      = "src.proposal_writer_lambda.lambda_handler"
       runtime      = "python3.12"
       memory_size  = 256
-      timeout      = 30
+      timeout      = 300
       vpc_enabled  = false
       environment = {
         AWS_USE_DUALSTACK_ENDPOINT             = "false"
         LOG_LEVEL                              = "INFO"
-        PROPOSAL_FALLBACK_MAX_TOKENS           = "1400"
-        PROPOSAL_FALLBACK_READ_TIMEOUT_SECONDS = "6"
-        PROPOSAL_HELPER_TIMEOUT_SECONDS        = "4"
-        PROPOSAL_WRITER_MAX_TOKENS             = "900"
-        PROPOSAL_WRITER_READ_TIMEOUT_SECONDS   = "10"
+        PROPOSAL_FALLBACK_MAX_TOKENS           = "2200"
+        PROPOSAL_FALLBACK_READ_TIMEOUT_SECONDS = "30"
+        PROPOSAL_HELPER_TIMEOUT_SECONDS        = "8"
+        PROPOSAL_WRITER_MAX_TOKENS             = "2800"
+        PROPOSAL_WRITER_READ_TIMEOUT_SECONDS   = "240"
       }
     }
 
@@ -292,6 +292,12 @@ variable "proposal_fallback_model_id" {
   description = "Bedrock model ID for cheap Proposal Writer fallback before deterministic templates."
   type        = string
   default     = "amazon.nova-pro-v1:0"
+}
+
+variable "proposal_job_ttl_seconds" {
+  description = "Seconds before Proposal Writer async job records expire from DynamoDB."
+  type        = number
+  default     = 86400
 }
 
 variable "sam_embedding_provider" {

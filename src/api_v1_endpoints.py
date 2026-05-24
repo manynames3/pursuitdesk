@@ -64,7 +64,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
     allow_headers=["accept", "authorization", "content-type", "x-request-id", "x-captureos-tenant", "x-captureos-user"],
     max_age=300,
 )

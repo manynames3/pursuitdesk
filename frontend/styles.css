@@ -11,6 +11,8 @@
   --accent-warm: #a16207;
   --accent-blue: #1d4ed8;
   --warn: #a16207;
+  --ok: #15803d;
+  --danger: #b91c1c;
   --shadow: 0 14px 40px rgba(21, 32, 46, 0.08);
 }
 
@@ -299,6 +301,60 @@ button.decision-clear[hidden] {
 
 .white-label-form {
   grid-template-columns: 1fr 120px 1fr auto;
+}
+
+.brand-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.brand-preview div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.brand-preview span,
+.brand-preview small,
+.form-status {
+  color: var(--muted);
+}
+
+.brand-preview strong,
+.brand-preview small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brand-preview code {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.form-status {
+  min-height: 1.2rem;
+  margin: 8px 0 0;
+  font-size: 0.82rem;
+}
+
+.form-status.is-success {
+  color: var(--ok);
+}
+
+.form-status.is-error {
+  color: var(--danger);
 }
 
 .inline-form {

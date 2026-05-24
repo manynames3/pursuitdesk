@@ -160,10 +160,19 @@
             <h3>White-label settings</h3>
             <form id="white-label-form" class="white-label-form">
               <input id="brand-name" placeholder="Advisory firm name" />
-              <input id="brand-color" placeholder="#0f766e" />
+              <input id="brand-color" placeholder="#0f766e" pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$" />
               <input id="brand-email" type="email" placeholder="advisor@example.com" />
-              <button class="secondary compact-button" type="submit">Save brand</button>
+              <button id="brand-save" class="secondary compact-button" type="submit">Save brand</button>
             </form>
+            <div class="brand-preview" aria-live="polite">
+              <div>
+                <span>Report brand</span>
+                <strong id="brand-preview-name">GovCon Advisory Practice</strong>
+                <small id="brand-preview-email">advisor@example.com</small>
+              </div>
+              <code id="brand-preview-color">#0f766e</code>
+            </div>
+            <p id="brand-save-status" class="form-status" role="status"></p>
           </section>
         </div>
       </section>

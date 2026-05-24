@@ -7,7 +7,7 @@ resource "aws_apigatewayv2_api" "http" {
   cors_configuration {
     allow_credentials = false
     allow_headers     = ["accept", "authorization", "content-type", "x-request-id", "x-captureos-tenant", "x-captureos-user"]
-    allow_methods     = ["GET", "POST", "OPTIONS"]
+    allow_methods     = ["GET", "POST", "PUT", "OPTIONS"]
     allow_origins     = var.api_cors_allowed_origins
     max_age           = 300
   }

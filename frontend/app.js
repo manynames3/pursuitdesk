@@ -208,6 +208,11 @@ const els = {
   brandName: document.querySelector("#brand-name"),
   brandColor: document.querySelector("#brand-color"),
   brandEmail: document.querySelector("#brand-email"),
+  brandSave: document.querySelector("#brand-save"),
+  brandSaveStatus: document.querySelector("#brand-save-status"),
+  brandPreviewName: document.querySelector("#brand-preview-name"),
+  brandPreviewEmail: document.querySelector("#brand-preview-email"),
+  brandPreviewColor: document.querySelector("#brand-preview-color"),
   trustPosture: document.querySelector("#trust-posture"),
   monitoringAlerts: document.querySelector("#monitoring-alerts"),
   opportunities: document.querySelector("#opportunities"),
@@ -283,6 +288,9 @@ els.demoFlowStart.addEventListener("click", () => els.intakeCompany.focus());
 els.clientIntake.addEventListener("submit", submitClientIntake);
 els.reminderForm.addEventListener("submit", submitReminder);
 els.whiteLabelForm.addEventListener("submit", submitWhiteLabel);
+els.brandName.addEventListener("input", updateBrandPreviewFromInputs);
+els.brandColor.addEventListener("input", updateBrandPreviewFromInputs);
+els.brandEmail.addEventListener("input", updateBrandPreviewFromInputs);
 
 renderProposalSectionCards();
 initialize();
@@ -800,12 +808,19 @@ async function submitReminder(event) {
 
 async function submitWhiteLabel(event) {
   event.preventDefault();
+  const primaryColor = els.brandColor.value.trim() || "#0f766e";
+  if (!/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(primaryColor)) {
+    setBrandSaveStatus("Use a valid hex color like #0f766e.", "error");
+    return;
+  }
   const payload = {
     organization_name: els.brandName.value.trim() || "GovCon Advisory Practice",
-    primary_color: els.brandColor.value.trim() || "#0f766e",
+    primary_color: primaryColor,
     support_email: els.brandEmail.value.trim() || selectedTeam().user_email,
     report_footer: "Prepared by your GovCon advisor. Decision support only; not legal or procurement advice.",
   };
+  setBrandSaving(true);
+  setBrandSaveStatus("Saving brand...", "");
   try {
     const result = await fetchJson(`${apiBaseUrl}/api/v1/consultant/settings/white-label`, {
       method: "PUT",
@@ -814,12 +829,39 @@ async function submitWhiteLabel(event) {
     });
     consultantWorkspace.white_label = result.settings;
     renderConsultantWorkspace(consultantWorkspace);
+    setBrandSaveStatus("Brand saved for client reports.", "success");
     setApiStatus("Live API");
   } catch (error) {
-    consultantWorkspace.white_label = payload;
-    renderConsultantWorkspace(consultantWorkspace);
+    setBrandSaveStatus("Brand could not be saved. Check the fields and try again.", "error");
     setApiStatus(offlineStatusLabel);
+  } finally {
+    setBrandSaving(false);
   }
+}
+
+function setBrandSaving(isSaving) {
+  els.brandSave.disabled = isSaving;
+  els.brandSave.textContent = isSaving ? "Saving..." : "Save brand";
+}
+
+function setBrandSaveStatus(message, state) {
+  els.brandSaveStatus.textContent = message;
+  els.brandSaveStatus.classList.toggle("is-success", state === "success");
+  els.brandSaveStatus.classList.toggle("is-error", state === "error");
+}
+
+function updateBrandPreviewFromInputs() {
+  renderBrandPreview({
+    organization_name: els.brandName.value.trim(),
+    primary_color: els.brandColor.value.trim(),
+    support_email: els.brandEmail.value.trim(),
+  });
+}
+
+function renderBrandPreview(whiteLabel = {}) {
+  els.brandPreviewName.textContent = whiteLabel.organization_name || "GovCon Advisory Practice";
+  els.brandPreviewEmail.textContent = whiteLabel.support_email || selectedTeam().user_email || "advisor@example.com";
+  els.brandPreviewColor.textContent = whiteLabel.primary_color || "#0f766e";
 }
 
 function renderOpportunities(items, total = items.length) {
@@ -852,6 +894,7 @@ function renderConsultantWorkspace(workspace) {
   els.brandName.value = whiteLabel.organization_name || "";
   els.brandColor.value = whiteLabel.primary_color || "#0f766e";
   els.brandEmail.value = whiteLabel.support_email || "";
+  renderBrandPreview(whiteLabel);
 
   els.portfolioClientCount.textContent = numberFormat(portfolio.client_count);
   els.portfolioPrimeReady.textContent = numberFormat(portfolio.prime_ready_clients);
@@ -1751,8 +1794,12 @@ function renderLocalClientReport(workspace) {
   const readiness = client.readiness || {};
   const profile = client.profile || {};
   const disclaimer = workspace.legal_disclaimer || {};
+  const brand = workspace.white_label || {};
   const lines = [
     `# GovCon Client Report: ${client.company_name || client.tenant_name || "Client"}`,
+    "",
+    `Prepared by: ${brand.organization_name || "GovCon Advisory Practice"}`,
+    brand.support_email ? `Contact: ${brand.support_email}` : "",
     "",
     "## Decision Support Notice",
     disclaimer.summary || "Decision support only. Validate source records, eligibility, pricing, and proposal compliance before advising a client.",

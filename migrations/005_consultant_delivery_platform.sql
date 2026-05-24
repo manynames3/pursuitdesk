@@ -10,9 +10,16 @@ CREATE TABLE IF NOT EXISTS capture.consultant_brand_settings (
   source_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  CHECK (primary_color ~ '^#[0-9A-Fa-f]{6}$'),
+  CHECK (primary_color ~ '^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$'),
   CHECK (logo_url IS NULL OR logo_url ~ '^https?://')
 );
+
+ALTER TABLE capture.consultant_brand_settings
+  DROP CONSTRAINT IF EXISTS consultant_brand_settings_primary_color_check;
+
+ALTER TABLE capture.consultant_brand_settings
+  ADD CONSTRAINT consultant_brand_settings_primary_color_check
+  CHECK (primary_color ~ '^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$');
 
 DROP TRIGGER IF EXISTS consultant_brand_settings_touch_updated_at ON capture.consultant_brand_settings;
 CREATE TRIGGER consultant_brand_settings_touch_updated_at

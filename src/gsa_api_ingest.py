@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 LOGGER = logging.getLogger(__name__)
@@ -1420,10 +1421,78 @@ def _append_api_key_for_sam_api(url: str, api_key: Optional[str]) -> str:
     return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query)))
 
 
+class _HTMLTextExtractor(HTMLParser):
+    _BLOCK_TAGS = {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "br",
+        "div",
+        "dl",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hr",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "td",
+        "th",
+        "tr",
+        "ul",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._fragments: List[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        tag_name = tag.lower()
+        if tag_name in {"script", "style", "noscript"}:
+            self._skip_depth += 1
+        elif tag_name in self._BLOCK_TAGS:
+            self._fragments.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_name = tag.lower()
+        if tag_name in {"script", "style", "noscript"} and self._skip_depth:
+            self._skip_depth -= 1
+        elif tag_name in self._BLOCK_TAGS:
+            self._fragments.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth and data:
+            self._fragments.append(data)
+
+    def text(self) -> str:
+        return html.unescape(" ".join(self._fragments))
+
+
 def _strip_html(text: str) -> str:
-    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
-    return html.unescape(text)
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(str(text))
+        parser.close()
+        return parser.text()
+    except Exception:
+        LOGGER.debug("Falling back to entity unescape after HTML parser failure.", exc_info=True)
+        return html.unescape(str(text))
 
 
 def _normalize_text(text: str) -> str:

@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 import threading
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Generator, Iterable, List, Mapping, Optional, Sequence
 from uuid import UUID
@@ -133,7 +133,7 @@ class ClientIntakeRequest(BaseModel):
 class WhiteLabelSettingsUpdate(BaseModel):
     organization_name: str = Field("GovCon Advisory Practice", min_length=2, max_length=180)
     logo_url: Optional[str] = Field(None, max_length=500)
-    primary_color: str = Field("#0f766e", pattern="^#[0-9A-Fa-f]{6}$")
+    primary_color: str = Field("#0f766e", pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$")
     report_footer: str = Field(
         "Prepared by your GovCon advisor. Decision support only; not legal or procurement advice.",
         min_length=3,
@@ -360,14 +360,21 @@ def _consultant_workspace_payload(
     data_freshness = _fetch_data_freshness(conn)
     compliance = _fetch_compliance_controls(conn)
     white_label = _fetch_white_label_settings(conn, context)
+    tenant_ids = [str(team["tenant_id"]) for team in teams if team.get("tenant_id")]
+    past_performance_by_tenant = _fetch_past_performance_by_tenant(conn, tenant_ids, limit=5)
+    pipeline_by_tenant = _fetch_pipeline_summary_by_tenant(conn, tenant_ids)
+    billing_by_tenant = _fetch_billing_accounts_by_tenant(conn, tenant_ids)
+    recommended_by_tenant = _fetch_recommended_opportunities_by_tenant(conn, teams, limit=5)
+    recompetes_by_tenant = _fetch_recompete_signals_by_tenant(conn, teams, limit=5)
+    reminders_by_tenant = _fetch_consultant_reminders_by_tenant(conn, tenant_ids, include_done=False)
     clients = []
     for team in teams:
-        tenant_id = team.get("tenant_id")
-        past_performance = _fetch_past_performance(conn, tenant_id, limit=5)
-        pipeline = _fetch_pipeline_summary(conn, tenant_id)
-        billing = _fetch_billing_account(conn, tenant_id)
+        tenant_id = str(team.get("tenant_id") or "")
+        past_performance = past_performance_by_tenant.get(tenant_id, [])
+        pipeline = pipeline_by_tenant.get(tenant_id, {"by_status": [], "high_priority": 0})
+        billing = billing_by_tenant.get(tenant_id, {"subscription_status": "not_configured"})
         readiness = _client_readiness_score(team, past_performance, pipeline)
-        recompetes = _fetch_recompete_signals(conn, team, limit=5)
+        recompetes = recompetes_by_tenant.get(tenant_id, [])
         clients.append(
             {
                 "tenant_id": tenant_id,
@@ -380,9 +387,9 @@ def _consultant_workspace_payload(
                 "pipeline": pipeline,
                 "billing": billing,
                 "past_performance": past_performance,
-                "recommended_opportunities": _fetch_recommended_opportunities(conn, team, limit=5),
+                "recommended_opportunities": recommended_by_tenant.get(tenant_id, []),
                 "recompete_signals": recompetes,
-                "reminders": _fetch_consultant_reminders(conn, tenant_id, include_done=False),
+                "reminders": reminders_by_tenant.get(tenant_id, []),
                 "client_portal": _client_portal_summary(team, readiness, pipeline),
             }
         )
@@ -402,6 +409,385 @@ def _consultant_workspace_payload(
         "data_freshness": data_freshness,
         "compliance_controls": compliance,
     }
+
+
+def _fetch_past_performance_by_tenant(conn, tenant_ids: Sequence[str], limit: int) -> Dict[str, List[Dict[str, Any]]]:
+    if not tenant_ids:
+        return {}
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM (
+                  SELECT
+                    tenant_id::text,
+                    past_performance_id::text,
+                    contract_number,
+                    role,
+                    prime_name,
+                    agency_name,
+                    agency_code,
+                    naics_code,
+                    psc_code,
+                    title,
+                    description,
+                    start_date,
+                    end_date,
+                    obligated_amount,
+                    contract_vehicles,
+                    clearance_required,
+                    customer_rating,
+                    updated_at,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY tenant_id
+                      ORDER BY obligated_amount DESC NULLS LAST, updated_at DESC
+                    ) AS tenant_rank
+                  FROM capture.customer_past_performance
+                  WHERE tenant_id = ANY(%(tenant_ids)s::uuid[])
+                ) ranked
+                WHERE tenant_rank <= %(limit)s
+                ORDER BY tenant_id, tenant_rank;
+                """,
+                {"tenant_ids": list(tenant_ids), "limit": limit},
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return {}
+        raise
+    return _group_by_tenant(rows)
+
+
+def _fetch_pipeline_summary_by_tenant(conn, tenant_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    if not tenant_ids:
+        return {}
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                  tenant_id::text,
+                  COALESCE(
+                    JSONB_AGG(
+                      JSONB_BUILD_OBJECT('status', status, 'count', status_count)
+                      ORDER BY status
+                    ),
+                    '[]'::jsonb
+                  ) AS by_status,
+                  COALESCE(SUM(status_count) FILTER (WHERE priority = 'high'), 0)::int AS high_priority,
+                  MIN(due_at) FILTER (WHERE status NOT IN ('no_bid', 'won', 'lost')) AS next_due_at
+                FROM (
+                  SELECT tenant_id, status, priority, COUNT(*)::int AS status_count, MIN(due_at) AS due_at
+                  FROM capture.capture_opportunity_workflow
+                  WHERE tenant_id = ANY(%(tenant_ids)s::uuid[])
+                  GROUP BY tenant_id, status, priority
+                ) s
+                GROUP BY tenant_id;
+                """,
+                {"tenant_ids": list(tenant_ids)},
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return {}
+        raise
+    summaries: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        item = _json_safe(dict(row))
+        tenant_id = str(item.pop("tenant_id"))
+        summaries[tenant_id] = item
+    return summaries
+
+
+def _fetch_billing_accounts_by_tenant(conn, tenant_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    if not tenant_ids:
+        return {}
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (tenant_id)
+                  tenant_id::text,
+                  billing_account_id::text,
+                  billing_provider,
+                  provider_customer_id,
+                  provider_subscription_id,
+                  subscription_status,
+                  price_id,
+                  trial_ends_at,
+                  current_period_ends_at,
+                  billing_email,
+                  updated_at
+                FROM capture.billing_accounts
+                WHERE tenant_id = ANY(%(tenant_ids)s::uuid[])
+                ORDER BY tenant_id, updated_at DESC;
+                """,
+                {"tenant_ids": list(tenant_ids)},
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return {}
+        raise
+    return {str(row["tenant_id"]): _json_safe(dict(row)) for row in rows}
+
+
+def _fetch_consultant_reminders_by_tenant(
+    conn,
+    tenant_ids: Sequence[str],
+    include_done: bool,
+    client_visible_only: bool = False,
+) -> Dict[str, List[Dict[str, Any]]]:
+    if not tenant_ids:
+        return {}
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM (
+                  SELECT
+                    r.reminder_id::text,
+                    r.tenant_id::text,
+                    r.opportunity_id::text,
+                    o.notice_id,
+                    o.title AS opportunity_title,
+                    r.owner_user_id::text,
+                    u.display_name AS owner_name,
+                    r.reminder_type,
+                    r.title,
+                    r.body,
+                    r.due_at,
+                    r.status,
+                    r.client_visible,
+                    r.updated_at,
+                    ROW_NUMBER() OVER (PARTITION BY r.tenant_id ORDER BY r.due_at ASC) AS tenant_rank
+                  FROM capture.consultant_reminders r
+                  LEFT JOIN capture.opportunities o ON o.opportunity_id = r.opportunity_id
+                  LEFT JOIN capture.tenant_users u ON u.user_id = r.owner_user_id
+                  WHERE r.tenant_id = ANY(%(tenant_ids)s::uuid[])
+                    AND (%(include_done)s OR r.status <> 'done')
+                    AND (NOT %(client_visible_only)s OR r.client_visible)
+                ) ranked
+                WHERE tenant_rank <= 30
+                ORDER BY tenant_id, due_at ASC;
+                """,
+                {"tenant_ids": list(tenant_ids), "include_done": include_done, "client_visible_only": client_visible_only},
+            )
+            rows = cur.fetchall()
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return {}
+        raise
+    return _group_by_tenant(rows)
+
+
+def _fetch_recommended_opportunities_by_tenant(
+    conn,
+    teams: Sequence[Mapping[str, Any]],
+    limit: int,
+) -> Dict[str, List[Dict[str, Any]]]:
+    profiles = [
+        (
+            team.get("tenant_id"),
+            team.get("target_naics_codes") or [],
+            team.get("target_psc_codes") or [],
+            team.get("target_agency_codes") or [],
+        )
+        for team in teams
+        if team.get("tenant_id")
+    ]
+    if not profiles:
+        return {}
+    from psycopg2.extras import execute_values
+
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            rows = execute_values(
+                cur,
+                f"""
+                WITH profile_targets(tenant_id, profile_naics, profile_psc, profile_agencies) AS (
+                  VALUES %s
+                ),
+                scored AS (
+                  SELECT
+                    p.tenant_id::text AS tenant_id,
+                    o.opportunity_id,
+                    o.notice_id,
+                    o.solicitation_number,
+                    o.title,
+                    o.opportunity_type,
+                    o.posted_at,
+                    o.response_deadline,
+                    o.naics_code,
+                    o.psc_code,
+                    o.set_aside_code,
+                    o.set_aside_description,
+                    o.funding_agency_name,
+                    o.funding_agency_code,
+                    o.estimated_value_min,
+                    o.estimated_value_max,
+                    o.currency_code,
+                    o.ui_link,
+                    (
+                      CASE WHEN array_length(p.profile_naics, 1) IS NOT NULL AND o.naics_code = ANY(p.profile_naics) THEN 0.34 ELSE 0 END
+                      + CASE WHEN array_length(p.profile_psc, 1) IS NOT NULL AND o.psc_code = ANY(p.profile_psc) THEN 0.24 ELSE 0 END
+                      + CASE WHEN array_length(p.profile_agencies, 1) IS NOT NULL AND o.funding_agency_code = ANY(p.profile_agencies) THEN 0.16 ELSE 0 END
+                      + CASE WHEN o.sow_embedding IS NOT NULL THEN 0.10 ELSE 0 END
+                      + CASE WHEN o.response_deadline IS NULL OR o.response_deadline >= now() + interval '5 days' THEN 0.08 ELSE 0.02 END
+                      + CASE WHEN o.ui_link IS NOT NULL OR o.description_url IS NOT NULL THEN 0.08 ELSE 0 END
+                    )::double precision AS dashboard_relevance_score
+                  FROM profile_targets p
+                  JOIN capture.opportunities o ON o.active_status = 'active'
+                    AND (o.response_deadline IS NULL OR o.response_deadline >= now())
+                    AND (
+                      (array_length(p.profile_naics, 1) IS NOT NULL AND o.naics_code = ANY(p.profile_naics))
+                      OR (array_length(p.profile_psc, 1) IS NOT NULL AND o.psc_code = ANY(p.profile_psc))
+                      OR (array_length(p.profile_agencies, 1) IS NOT NULL AND o.funding_agency_code = ANY(p.profile_agencies))
+                    )
+                ),
+                ranked AS (
+                  SELECT
+                    scored.*,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY tenant_id
+                      ORDER BY dashboard_relevance_score DESC, response_deadline NULLS LAST, posted_at DESC NULLS LAST
+                    ) AS tenant_rank
+                  FROM scored
+                )
+                SELECT *
+                FROM ranked
+                WHERE tenant_rank <= {int(limit)}
+                ORDER BY tenant_id, tenant_rank;
+                """,
+                profiles,
+                template="(%s::uuid,%s::text[],%s::text[],%s::text[])",
+                fetch=True,
+            )
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return {}
+        raise
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        item = _opportunity_row(row)
+        item["recommended_action"] = _recommended_action_from_scores(
+            p_win=0.14 + min(0.24, float(row["dashboard_relevance_score"]) * 0.32),
+            profile_fit=float(row["dashboard_relevance_score"]),
+            has_source=bool(row.get("ui_link")),
+            response_deadline=row.get("response_deadline"),
+        )
+        grouped.setdefault(str(row["tenant_id"]), []).append(item)
+    return grouped
+
+
+def _fetch_recompete_signals_by_tenant(
+    conn,
+    teams: Sequence[Mapping[str, Any]],
+    limit: int,
+) -> Dict[str, List[Dict[str, Any]]]:
+    profiles = [
+        (
+            team.get("tenant_id"),
+            team.get("target_naics_codes") or [],
+            team.get("target_psc_codes") or [],
+            team.get("target_agency_codes") or [],
+        )
+        for team in teams
+        if team.get("tenant_id")
+    ]
+    if not profiles:
+        return {}
+    from psycopg2.extras import execute_values
+
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            rows = execute_values(
+                cur,
+                f"""
+                WITH profile_targets(tenant_id, profile_naics, profile_psc, profile_agencies) AS (
+                  VALUES %s
+                ),
+                scored AS (
+                  SELECT
+                    p.tenant_id::text AS tenant_id,
+                    a.award_id::text,
+                    a.piid,
+                    a.award_number,
+                    a.title,
+                    a.description,
+                    a.period_of_performance_end,
+                    a.signed_date,
+                    a.funding_agency_name,
+                    a.funding_agency_code,
+                    a.naics_code,
+                    a.psc_code,
+                    COALESCE(a.total_obligation, a.current_total_value, a.potential_total_value, 0)::numeric AS award_value,
+                    e.legal_name AS incumbent_name,
+                    e.canonical_uei,
+                    CASE
+                      WHEN a.period_of_performance_end BETWEEN current_date AND current_date + interval '9 months' THEN 'near_term_recompete'
+                      WHEN a.period_of_performance_end BETWEEN current_date + interval '9 months' AND current_date + interval '18 months' THEN 'watch_recompete'
+                      ELSE 'market_signal'
+                    END AS signal_type,
+                    (
+                      CASE WHEN array_length(p.profile_naics, 1) IS NOT NULL AND a.naics_code = ANY(p.profile_naics) THEN 0.34 ELSE 0 END
+                      + CASE WHEN array_length(p.profile_psc, 1) IS NOT NULL AND a.psc_code = ANY(p.profile_psc) THEN 0.24 ELSE 0 END
+                      + CASE WHEN array_length(p.profile_agencies, 1) IS NOT NULL AND a.funding_agency_code = ANY(p.profile_agencies) THEN 0.22 ELSE 0 END
+                      + CASE WHEN a.period_of_performance_end BETWEEN current_date AND current_date + interval '18 months' THEN 0.20 ELSE 0.05 END
+                    )::double precision AS signal_score
+                  FROM profile_targets p
+                  JOIN capture.awards a ON (
+                    (array_length(p.profile_naics, 1) IS NOT NULL AND a.naics_code = ANY(p.profile_naics))
+                    OR (array_length(p.profile_psc, 1) IS NOT NULL AND a.psc_code = ANY(p.profile_psc))
+                    OR (array_length(p.profile_agencies, 1) IS NOT NULL AND a.funding_agency_code = ANY(p.profile_agencies))
+                  )
+                  JOIN capture.entities e ON e.entity_id = a.prime_entity_id
+                  WHERE a.period_of_performance_end IS NULL
+                     OR a.period_of_performance_end >= current_date - interval '90 days'
+                ),
+                ranked AS (
+                  SELECT
+                    scored.*,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY tenant_id
+                      ORDER BY signal_score DESC, period_of_performance_end NULLS LAST, award_value DESC
+                    ) AS tenant_rank
+                  FROM scored
+                )
+                SELECT *
+                FROM ranked
+                WHERE tenant_rank <= {int(limit)}
+                ORDER BY tenant_id, tenant_rank;
+                """,
+                profiles,
+                template="(%s::uuid,%s::text[],%s::text[],%s::text[])",
+                fetch=True,
+            )
+    except psycopg2.Error as exc:
+        if exc.pgcode == "42P01":
+            conn.rollback()
+            return {}
+        raise
+    return _group_by_tenant(rows)
+
+
+def _group_by_tenant(rows: Iterable[Mapping[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        item = _json_safe(dict(row))
+        tenant_id = str(item.pop("tenant_id", ""))
+        item.pop("tenant_rank", None)
+        if tenant_id:
+            grouped.setdefault(tenant_id, []).append(item)
+    return grouped
 
 
 @router.post("/consultant/clients/intake")
@@ -1281,7 +1667,7 @@ def _upsert_client_from_intake(
     }
     risk_preferences = {
         "consultant_notes": payload.consultant_notes,
-        "intake_completed_at": datetime.utcnow().isoformat() + "Z",
+        "intake_completed_at": datetime.now(timezone.utc).isoformat(),
     }
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(

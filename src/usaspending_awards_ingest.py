@@ -182,13 +182,28 @@ def upsert_awards_to_database(records: List[Mapping[str, Any]]) -> int:
                 page_size=100,
             )
 
+            cur.execute(
+                """
+                WITH prime_names(name) AS (
+                  SELECT unnest(%(prime_names)s::text[])
+                )
+                SELECT DISTINCT ON (name)
+                  name,
+                  e.entity_id::text AS entity_id
+                FROM prime_names
+                JOIN capture.entities e
+                  ON e.normalized_legal_name = capture.normalize_entity_name(name)
+                ORDER BY name, e.updated_at DESC;
+                """,
+                {"prime_names": [award["prime_name"] for award in award_rows]},
+            )
+            entity_id_by_prime_name = {str(row[0]): str(row[1]) for row in cur.fetchall()}
+
             values = []
             for award in award_rows:
-                cur.execute(
-                    "SELECT entity_id FROM capture.entities WHERE normalized_legal_name = capture.normalize_entity_name(%s) LIMIT 1;",
-                    (award["prime_name"],),
-                )
-                entity_id = cur.fetchone()[0]
+                entity_id = entity_id_by_prime_name.get(award["prime_name"])
+                if not entity_id:
+                    raise USAspendingIngestError(f"Could not resolve entity for USAspending recipient: {award['prime_name']}")
                 values.append(
                     (
                         award["contract_award_unique_key"],

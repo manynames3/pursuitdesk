@@ -1,6 +1,6 @@
-# GovCon CaptureOS
+# PursuitDesk
 
-GovCon CaptureOS is an AI-assisted federal market intelligence demo stack for opportunity discovery, entity resolution, capture scoring, subcontractor graph analysis, and CALC+ labor-rate benchmarking.
+PursuitDesk is a GovCon consulting delivery platform for small-business advisors: client intake, readiness scoring, pursuit recommendations, capture workflow, proposal support, and branded client deliverables.
 
 ## Repository Layout
 

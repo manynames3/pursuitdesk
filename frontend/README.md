@@ -1,6 +1,6 @@
-# GovCon CaptureOS Frontend
+# PursuitDesk Frontend
 
-Static Cloudflare Pages dashboard for the GovCon CaptureOS demo.
+Static Cloudflare Pages dashboard for the PursuitDesk demo.
 
 Cloudflare Pages Git settings:
 

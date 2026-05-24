@@ -1726,9 +1726,9 @@ def raw_sub_variant(sub_name: str, index: int) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Seed GovCon CaptureOS with deterministic high-fidelity mock data.")
+    parser = argparse.ArgumentParser(description="Seed PursuitDesk with deterministic high-fidelity mock data.")
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"), help="PostgreSQL DSN. Defaults to DATABASE_URL.")
-    parser.add_argument("--reset", action="store_true", help="Truncate seeded CaptureOS tables before inserting.")
+    parser.add_argument("--reset", action="store_true", help="Truncate seeded PursuitDesk tables before inserting.")
     return parser.parse_args()
 
 
@@ -1737,7 +1737,7 @@ def main() -> None:
     if not args.database_url:
         raise SystemExit("Provide --database-url or set DATABASE_URL.")
     counts = seed_mock_data(args.database_url, reset=args.reset)
-    print("Seeded GovCon CaptureOS mock data:")
+    print("Seeded PursuitDesk mock data:")
     for table_name, count in counts.items():
         print(f"  {table_name}: {count}")
 

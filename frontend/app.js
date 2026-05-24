@@ -1633,7 +1633,7 @@ function buildFallbackWorkspace() {
       live_source_count: 4,
       import_backed_source_count: 0,
       mock_source_count: 0,
-      disclaimer: "Decision support only. GovCon CaptureOS does not provide legal advice, procurement advice, bid/no-bid directives, or a guarantee of award.",
+      disclaimer: "Decision support only. PursuitDesk does not provide legal advice, procurement advice, bid/no-bid directives, or a guarantee of award.",
     },
     legal_disclaimer: {
       title: "Procurement Decision Support Notice",
@@ -1796,7 +1796,7 @@ function renderLocalClientReport(workspace) {
   const disclaimer = workspace.legal_disclaimer || {};
   const brand = workspace.white_label || {};
   const lines = [
-    `# GovCon Client Report: ${client.company_name || client.tenant_name || "Client"}`,
+    `# PursuitDesk Client Report: ${client.company_name || client.tenant_name || "Client"}`,
     "",
     `Prepared by: ${brand.organization_name || "GovCon Advisory Practice"}`,
     brand.support_email ? `Contact: ${brand.support_email}` : "",

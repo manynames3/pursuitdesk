@@ -1,1 +1,1 @@
-"""GovCon CaptureOS backend modules."""
+"""PursuitDesk backend modules."""

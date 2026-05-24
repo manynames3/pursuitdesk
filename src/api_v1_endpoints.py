@@ -52,14 +52,14 @@ PROPOSAL_HELPER_TIMEOUT_SECONDS = float(os.getenv("PROPOSAL_HELPER_TIMEOUT_SECON
 PROPOSAL_WRITER_MAX_TOKENS = int(os.getenv("PROPOSAL_WRITER_MAX_TOKENS", "2800"))
 PROPOSAL_FALLBACK_MAX_TOKENS = int(os.getenv("PROPOSAL_FALLBACK_MAX_TOKENS", "2200"))
 PROCUREMENT_DECISION_DISCLAIMER = (
-    "Decision support only. GovCon CaptureOS does not provide legal advice, procurement advice, bid/no-bid directives, "
+    "Decision support only. PursuitDesk does not provide legal advice, procurement advice, bid/no-bid directives, "
     "or a guarantee of award. Consultants remain responsible for validating source records, FAR/agency requirements, "
     "client eligibility, pricing assumptions, conflicts, and proposal compliance before advising a client or submitting a response."
 )
 
 LOGGER = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/v1", tags=["GovCon CaptureOS v1"])
-app = FastAPI(title="GovCon CaptureOS Presentation API", version="1.0.0")
+router = APIRouter(prefix="/api/v1", tags=["PursuitDesk v1"])
+app = FastAPI(title="PursuitDesk API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -3428,7 +3428,7 @@ def _run_bedrock_call_with_deadline(callable_obj, seconds: float) -> Dict[str, A
 
 def _proposal_writer_system_prompt() -> str:
     return (
-        "You are GovCon CaptureOS Proposal Writer for government-contracting consultants. "
+        "You are PursuitDesk Proposal Writer for government-contracting consultants. "
         "Write polished, source-grounded proposal narrative in Markdown. "
         "Do not claim legal advice, bid/no-bid authority, guaranteed award, certifications, clearances, or past performance that is not in the provided context. "
         "Mark assumptions clearly. Include a compliance checklist. Return only Markdown."
@@ -3808,7 +3808,7 @@ def _render_client_report_markdown(workspace: Mapping[str, Any]) -> str:
     disclaimer = workspace.get("legal_disclaimer", {})
     data_freshness = workspace.get("data_freshness", [])
     lines = [
-        f"# GovCon Client Report: {client.get('company_name') or client.get('tenant_name') or 'Client'}",
+        f"# PursuitDesk Client Report: {client.get('company_name') or client.get('tenant_name') or 'Client'}",
         "",
         f"Prepared by: {brand.get('organization_name', 'GovCon Advisory Practice')}",
         "",

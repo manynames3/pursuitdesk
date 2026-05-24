@@ -12,6 +12,9 @@ MAX_PAGES="${GSA_INGEST_MAX_PAGES:-2}"
 ENRICHMENT_BATCH_LIMIT="${SAM_ENRICHMENT_BATCH_LIMIT:-10}"
 ENRICHMENT_FETCH_DOCUMENTS="${SAM_ENRICHMENT_FETCH_DOCUMENTS:-false}"
 USASPENDING_MAX_PAGES="${USASPENDING_AWARDS_MAX_PAGES:-5}"
+USASPENDING_SUBAWARDS_MAX_PAGES="${USASPENDING_SUBAWARDS_MAX_PAGES:-5}"
+GSA_CALC_MAX_PAGES="${GSA_CALC_MAX_PAGES:-2}"
+GSA_CALC_PAGE_SIZE="${GSA_CALC_PAGE_SIZE:-100}"
 BACKFILL_DAYS="${GSA_BACKFILL_DAYS:-30}"
 BACKFILL_MAX_PAGES="${GSA_BACKFILL_MAX_PAGES:-10}"
 
@@ -70,6 +73,11 @@ sam_enrichment_batch_limit = $ENRICHMENT_BATCH_LIMIT
 sam_enrichment_fetch_documents = $ENRICHMENT_FETCH_DOCUMENTS
 enable_usaspending_awards_schedule = true
 usaspending_awards_max_pages = $USASPENDING_MAX_PAGES
+enable_usaspending_subawards_schedule = true
+usaspending_subawards_max_pages = $USASPENDING_SUBAWARDS_MAX_PAGES
+enable_gsa_calc_schedule = true
+gsa_calc_max_pages = $GSA_CALC_MAX_PAGES
+gsa_calc_page_size = $GSA_CALC_PAGE_SIZE
 EOF
 
 terraform -chdir="$TF_DIR" apply -auto-approve
@@ -78,6 +86,10 @@ INGEST_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names
 UPSERT_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["upsert"])')"
 AWARDS_INGEST_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["awards_ingest"])')"
 AWARDS_UPSERT_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["awards_upsert"])')"
+SUBAWARDS_INGEST_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["subawards_ingest"])')"
+SUBAWARDS_UPSERT_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["subawards_upsert"])')"
+CALC_INGEST_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["calc_ingest"])')"
+CALC_UPSERT_FUNCTION="$(terraform -chdir="$TF_DIR" output -json lambda_function_names | python3 -c 'import json, sys; print(json.load(sys.stdin)["calc_upsert"])')"
 
 cat >/tmp/captureos-sam-backfill-event.json <<EOF
 {
@@ -140,4 +152,44 @@ aws lambda invoke \
   /tmp/captureos-usaspending-awards-response.json >/dev/null
 
 cat /tmp/captureos-usaspending-awards-response.json
-printf '\nLive SAM.gov ingestion is enabled. Secret ARN is stored in %s/live_ingest.auto.tfvars.\n' "$TF_DIR"
+printf '\n'
+
+cat >/tmp/captureos-usaspending-subawards-event.json <<EOF
+{
+  "source": "manual.backfill",
+  "dataset": "fsrs_subawards",
+  "lookback_days": 365,
+  "max_pages": $USASPENDING_SUBAWARDS_MAX_PAGES,
+  "upsert_lambda_name": "$SUBAWARDS_UPSERT_FUNCTION"
+}
+EOF
+
+aws lambda invoke \
+  --region "$AWS_REGION" \
+  --function-name "$SUBAWARDS_INGEST_FUNCTION" \
+  --cli-binary-format raw-in-base64-out \
+  --payload file:///tmp/captureos-usaspending-subawards-event.json \
+  /tmp/captureos-usaspending-subawards-response.json >/dev/null
+
+cat /tmp/captureos-usaspending-subawards-response.json
+printf '\n'
+
+cat >/tmp/captureos-gsa-calc-event.json <<EOF
+{
+  "source": "manual.backfill",
+  "dataset": "gsa_calc_labor_rates",
+  "max_pages": $GSA_CALC_MAX_PAGES,
+  "page_size": $GSA_CALC_PAGE_SIZE,
+  "upsert_lambda_name": "$CALC_UPSERT_FUNCTION"
+}
+EOF
+
+aws lambda invoke \
+  --region "$AWS_REGION" \
+  --function-name "$CALC_INGEST_FUNCTION" \
+  --cli-binary-format raw-in-base64-out \
+  --payload file:///tmp/captureos-gsa-calc-event.json \
+  /tmp/captureos-gsa-calc-response.json >/dev/null
+
+cat /tmp/captureos-gsa-calc-response.json
+printf '\nLive SAM.gov, USAspending, FSRS-derived subaward, and GSA CALC+ ingestion are enabled. Secret ARN is stored in %s/live_ingest.auto.tfvars.\n' "$TF_DIR"

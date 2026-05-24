@@ -138,6 +138,52 @@ variable "lambda_functions" {
       }
     }
 
+    subawards_ingest = {
+      package_path = "../../dist/captureos_ingest.zip"
+      handler      = "src.usaspending_subawards_ingest.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 128
+      timeout      = 90
+      vpc_enabled  = false
+      environment = {
+        LOG_LEVEL = "INFO"
+      }
+    }
+
+    subawards_upsert = {
+      package_path = "../../dist/captureos_ingest.zip"
+      handler      = "src.usaspending_subawards_ingest.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 128
+      timeout      = 90
+      environment = {
+        LOG_LEVEL = "INFO"
+      }
+    }
+
+    calc_ingest = {
+      package_path = "../../dist/captureos_ingest.zip"
+      handler      = "src.gsa_calc_ingest.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 128
+      timeout      = 90
+      vpc_enabled  = false
+      environment = {
+        LOG_LEVEL = "INFO"
+      }
+    }
+
+    calc_upsert = {
+      package_path = "../../dist/captureos_ingest.zip"
+      handler      = "src.gsa_calc_ingest.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 128
+      timeout      = 90
+      environment = {
+        LOG_LEVEL = "INFO"
+      }
+    }
+
     resolver = {
       package_path = "../../dist/captureos_resolver.zip"
       handler      = "src.entity_resolver_lambda.lambda_handler"
@@ -354,6 +400,72 @@ variable "usaspending_awards_max_pages" {
   description = "Maximum USAspending pages to read per scheduled run."
   type        = number
   default     = 5
+}
+
+variable "enable_usaspending_subawards_schedule" {
+  description = "Create a low-cost EventBridge Scheduler job for FSRS-derived USAspending subaward ingest."
+  type        = bool
+  default     = false
+}
+
+variable "usaspending_subawards_schedule_expression" {
+  description = "EventBridge Scheduler expression for FSRS-derived USAspending subaward ingest."
+  type        = string
+  default     = "rate(24 hours)"
+}
+
+variable "usaspending_subawards_lookback_days" {
+  description = "Number of subaward date days the scheduled USAspending subaward ingest scans each run."
+  type        = number
+  default     = 365
+}
+
+variable "usaspending_subawards_max_pages" {
+  description = "Maximum USAspending subaward pages to read per scheduled run."
+  type        = number
+  default     = 5
+}
+
+variable "enable_gsa_calc_schedule" {
+  description = "Create a low-cost EventBridge Scheduler job for GSA CALC+ labor ceiling-rate ingest."
+  type        = bool
+  default     = false
+}
+
+variable "gsa_calc_schedule_expression" {
+  description = "EventBridge Scheduler expression for GSA CALC+ labor ceiling-rate ingest."
+  type        = string
+  default     = "rate(24 hours)"
+}
+
+variable "gsa_calc_keywords" {
+  description = "Labor-category keywords to query from GSA CALC+ per scheduled run."
+  type        = list(string)
+  default = [
+    "program manager",
+    "project manager",
+    "business analyst",
+    "systems engineer",
+    "data scientist",
+    "cloud architect",
+    "cyber security",
+    "devsecops",
+    "logistics analyst",
+    "construction manager",
+    "estimator"
+  ]
+}
+
+variable "gsa_calc_max_pages" {
+  description = "Maximum GSA CALC+ pages to read per keyword per scheduled run."
+  type        = number
+  default     = 2
+}
+
+variable "gsa_calc_page_size" {
+  description = "GSA CALC+ page size per keyword request."
+  type        = number
+  default     = 100
 }
 
 variable "enable_cloudwatch_alarms" {

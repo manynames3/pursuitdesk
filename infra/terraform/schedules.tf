@@ -1,5 +1,5 @@
 locals {
-  scheduler_enabled = var.enable_gsa_ingest_schedule || var.enable_sam_enrichment_schedule || var.enable_usaspending_awards_schedule
+  scheduler_enabled = var.enable_gsa_ingest_schedule || var.enable_sam_enrichment_schedule || var.enable_usaspending_awards_schedule || var.enable_usaspending_subawards_schedule || var.enable_gsa_calc_schedule
 }
 
 resource "aws_iam_role" "scheduler_invoke_lambda" {
@@ -40,7 +40,9 @@ resource "aws_iam_role_policy" "scheduler_invoke_lambda" {
         Resource = compact([
           var.enable_gsa_ingest_schedule ? aws_lambda_function.backend["ingest"].arn : "",
           var.enable_sam_enrichment_schedule ? aws_lambda_function.backend["upsert"].arn : "",
-          var.enable_usaspending_awards_schedule ? aws_lambda_function.backend["awards_ingest"].arn : ""
+          var.enable_usaspending_awards_schedule ? aws_lambda_function.backend["awards_ingest"].arn : "",
+          var.enable_usaspending_subawards_schedule ? aws_lambda_function.backend["subawards_ingest"].arn : "",
+          var.enable_gsa_calc_schedule ? aws_lambda_function.backend["calc_ingest"].arn : ""
         ])
       }
     ]
@@ -107,6 +109,75 @@ resource "aws_scheduler_schedule" "usaspending_awards_ingest" {
       lookback_days      = var.usaspending_awards_lookback_days
       max_pages          = var.usaspending_awards_max_pages
       upsert_lambda_name = aws_lambda_function.backend["awards_upsert"].function_name
+    })
+
+    retry_policy {
+      maximum_event_age_in_seconds = 3600
+      maximum_retry_attempts       = 1
+    }
+  }
+}
+
+resource "aws_scheduler_schedule" "usaspending_subawards_ingest" {
+  count = var.enable_usaspending_subawards_schedule ? 1 : 0
+
+  name        = "${local.name_prefix}-usaspending-subawards-ingest"
+  description = "Low-cost scheduled FSRS-derived subaward ingestion through USAspending for CaptureOS partner and supply-chain signals."
+  group_name  = "default"
+
+  schedule_expression          = var.usaspending_subawards_schedule_expression
+  schedule_expression_timezone = "UTC"
+  state                        = "ENABLED"
+
+  flexible_time_window {
+    mode                      = "FLEXIBLE"
+    maximum_window_in_minutes = 30
+  }
+
+  target {
+    arn      = aws_lambda_function.backend["subawards_ingest"].arn
+    role_arn = aws_iam_role.scheduler_invoke_lambda[0].arn
+    input = jsonencode({
+      source             = "aws.scheduler"
+      dataset            = "fsrs_subawards"
+      lookback_days      = var.usaspending_subawards_lookback_days
+      max_pages          = var.usaspending_subawards_max_pages
+      upsert_lambda_name = aws_lambda_function.backend["subawards_upsert"].function_name
+    })
+
+    retry_policy {
+      maximum_event_age_in_seconds = 3600
+      maximum_retry_attempts       = 1
+    }
+  }
+}
+
+resource "aws_scheduler_schedule" "gsa_calc_ingest" {
+  count = var.enable_gsa_calc_schedule ? 1 : 0
+
+  name        = "${local.name_prefix}-gsa-calc-ingest"
+  description = "Low-cost scheduled GSA CALC+ labor ceiling-rate benchmark ingestion for CaptureOS pricing support."
+  group_name  = "default"
+
+  schedule_expression          = var.gsa_calc_schedule_expression
+  schedule_expression_timezone = "UTC"
+  state                        = "ENABLED"
+
+  flexible_time_window {
+    mode                      = "FLEXIBLE"
+    maximum_window_in_minutes = 30
+  }
+
+  target {
+    arn      = aws_lambda_function.backend["calc_ingest"].arn
+    role_arn = aws_iam_role.scheduler_invoke_lambda[0].arn
+    input = jsonencode({
+      source             = "aws.scheduler"
+      dataset            = "gsa_calc_labor_rates"
+      keywords           = var.gsa_calc_keywords
+      max_pages          = var.gsa_calc_max_pages
+      page_size          = var.gsa_calc_page_size
+      upsert_lambda_name = aws_lambda_function.backend["calc_upsert"].function_name
     })
 
     retry_policy {

@@ -3239,6 +3239,8 @@ def _fetch_calc_benchmarks(conn, opportunity_id: str, max_rows: int) -> List[Dic
 def _extract_labor_categories(text: str) -> List[str]:
     lowered = text.lower()
     category_patterns = {
+        "construction manager": ("construction manager", "site superintendent", "foreman", "construction"),
+        "cost estimator": ("cost estimator", "estimator", "quantity takeoff"),
         "program manager": ("program manager", "project manager", "pmp"),
         "cloud architect": ("cloud architect", "aws architect", "cloud migration"),
         "cyber security engineer": ("cyber", "zero trust", "soc analyst", "security engineer"),
@@ -3265,6 +3267,8 @@ def _default_labor_categories(opportunity: Mapping[str, Any]) -> List[str]:
         return ["program manager", "data scientist", "systems engineer"]
     if naics in {"541330", "541614"} or psc in {"R706", "J099"}:
         return ["program manager", "systems engineer", "logistics analyst"]
+    if naics and naics.startswith("23"):
+        return ["program manager", "construction manager", "cost estimator", "business analyst"]
     return ["program manager", "business analyst", "systems engineer"]
 
 

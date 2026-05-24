@@ -86,9 +86,23 @@ variable "lambda_functions" {
       handler      = "src.lambda_api.handler"
       runtime      = "python3.12"
       memory_size  = 256
-      timeout      = 20
+      timeout      = 30
       environment = {
         APP_MODULE = "src.api_v1_endpoints:app"
+      }
+    }
+
+    proposal_writer = {
+      package_path = "../../dist/captureos_api.zip"
+      handler      = "src.proposal_writer_lambda.lambda_handler"
+      runtime      = "python3.12"
+      memory_size  = 256
+      timeout      = 30
+      vpc_enabled  = false
+      environment = {
+        AWS_USE_DUALSTACK_ENDPOINT      = "false"
+        LOG_LEVEL                       = "INFO"
+        PROPOSAL_HELPER_TIMEOUT_SECONDS = "10"
       }
     }
 
@@ -245,6 +259,35 @@ variable "bedrock_embedding_model_id" {
   description = "Bedrock text embedding model for SAM.gov SOW enrichment when sam_embedding_provider is bedrock."
   type        = string
   default     = "amazon.titan-embed-text-v1"
+}
+
+variable "proposal_writer_provider" {
+  description = "Proposal Writer generation backend. bedrock uses Nova Lite preprocessing plus Sonnet drafting; template keeps deterministic fallback only."
+  type        = string
+  default     = "bedrock"
+
+  validation {
+    condition     = contains(["bedrock", "template"], var.proposal_writer_provider)
+    error_message = "proposal_writer_provider must be bedrock or template."
+  }
+}
+
+variable "proposal_writer_model_id" {
+  description = "Bedrock model ID or inference profile for final Proposal Writer drafts."
+  type        = string
+  default     = "us.anthropic.claude-sonnet-4-6"
+}
+
+variable "proposal_helper_model_id" {
+  description = "Bedrock model ID for low-cost Section L/M extraction and opportunity/evidence summarization."
+  type        = string
+  default     = "amazon.nova-lite-v1:0"
+}
+
+variable "proposal_fallback_model_id" {
+  description = "Bedrock model ID for cheap Proposal Writer fallback before deterministic templates."
+  type        = string
+  default     = "amazon.nova-pro-v1:0"
 }
 
 variable "sam_embedding_provider" {

@@ -23,6 +23,10 @@ locals {
     STRIPE_API_KEY_SECRET_ARN  = var.stripe_api_key_secret_arn
     STRIPE_PRICE_ID            = var.stripe_price_id
     STRIPE_WEBHOOK_SECRET_ARN  = var.stripe_webhook_secret_arn
+    PROPOSAL_FALLBACK_MODEL_ID = var.proposal_fallback_model_id
+    PROPOSAL_HELPER_MODEL_ID   = var.proposal_helper_model_id
+    PROPOSAL_WRITER_MODEL_ID   = var.proposal_writer_model_id
+    PROPOSAL_WRITER_PROVIDER   = var.proposal_writer_provider
     SAM_EMBEDDING_PROVIDER     = var.sam_embedding_provider
     VECTOR_STORE               = "pgvector"
   }

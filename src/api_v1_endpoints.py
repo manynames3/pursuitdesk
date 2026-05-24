@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import hashlib
 import hmac
+import logging
 import os
 import urllib.error
 import urllib.parse
 import urllib.request
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -42,12 +44,20 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_WEBHOOK_SECRET_ARN = os.getenv("STRIPE_WEBHOOK_SECRET_ARN", "")
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", "https://govcon-captureos.pages.dev")
+PROPOSAL_WRITER_PROVIDER = os.getenv("PROPOSAL_WRITER_PROVIDER", "template").strip().lower()
+PROPOSAL_WRITER_MODEL_ID = os.getenv("PROPOSAL_WRITER_MODEL_ID", os.getenv("BEDROCK_MODEL_ID", ""))
+PROPOSAL_HELPER_MODEL_ID = os.getenv("PROPOSAL_HELPER_MODEL_ID", "amazon.nova-lite-v1:0")
+PROPOSAL_FALLBACK_MODEL_ID = os.getenv("PROPOSAL_FALLBACK_MODEL_ID", "amazon.nova-pro-v1:0")
+PROPOSAL_HELPER_TIMEOUT_SECONDS = float(os.getenv("PROPOSAL_HELPER_TIMEOUT_SECONDS", "5"))
+PROPOSAL_WRITER_MAX_TOKENS = int(os.getenv("PROPOSAL_WRITER_MAX_TOKENS", "2800"))
+PROPOSAL_FALLBACK_MAX_TOKENS = int(os.getenv("PROPOSAL_FALLBACK_MAX_TOKENS", "2200"))
 PROCUREMENT_DECISION_DISCLAIMER = (
     "Decision support only. GovCon CaptureOS does not provide legal advice, procurement advice, bid/no-bid directives, "
     "or a guarantee of award. Consultants remain responsible for validating source records, FAR/agency requirements, "
     "client eligibility, pricing assumptions, conflicts, and proposal compliance before advising a client or submitting a response."
 )
 
+LOGGER = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["GovCon CaptureOS v1"])
 app = FastAPI(title="GovCon CaptureOS Presentation API", version="1.0.0")
 app.add_middleware(
@@ -341,13 +351,12 @@ def create_proposal_draft(
     conn=Depends(get_db_connection),
 ) -> Dict[str, Any]:
     context = _load_request_context(conn, request)
-    draft = _render_proposal_writer_markdown(payload, context)
+    result = _generate_proposal_writer_response(payload, context)
     return {
-        "draft": draft,
+        **result,
         "target_section": payload.target_section,
         "opportunity_id": payload.opportunity_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "generation_mode": "deterministic_template",
         "legal_disclaimer": _procurement_decision_disclaimer(),
     }
 
@@ -3225,6 +3234,357 @@ def _record_audit_event(
                 "metadata": json.dumps(_json_safe(metadata)),
             },
         )
+
+
+def _generate_proposal_writer_response(payload: ProposalWriterRequest, context: Mapping[str, Any]) -> Dict[str, Any]:
+    template_draft = _render_proposal_writer_markdown(payload, context)
+    if PROPOSAL_WRITER_PROVIDER not in {"bedrock", "aws_bedrock"} or not PROPOSAL_WRITER_MODEL_ID:
+        return {
+            "draft": template_draft,
+            "generation_mode": "deterministic_template",
+            "model_trace": [{"stage": "template_fallback", "status": "used"}],
+        }
+
+    trace: List[Dict[str, Any]] = []
+    section_context, evidence_summary = _proposal_helper_outputs(payload, trace)
+    past_performance_match = _proposal_past_performance_match_summary(payload)
+    prompt = _proposal_writer_prompt(payload, context, section_context, evidence_summary, past_performance_match)
+    system_prompt = _proposal_writer_system_prompt()
+    try:
+        draft, usage = _invoke_bedrock_text(
+            model_id=PROPOSAL_WRITER_MODEL_ID,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            max_tokens=PROPOSAL_WRITER_MAX_TOKENS,
+            temperature=0.22,
+            read_timeout_seconds=float(os.getenv("PROPOSAL_WRITER_READ_TIMEOUT_SECONDS", "20")),
+        )
+        trace.append({"stage": "final_proposal_draft_and_compliance", "model_id": PROPOSAL_WRITER_MODEL_ID, "status": "ok", "usage": usage})
+        return {
+            "draft": _ensure_proposal_disclaimer(draft, payload),
+            "generation_mode": "bedrock_sonnet",
+            "model_trace": trace,
+        }
+    except Exception as exc:
+        LOGGER.warning("Proposal Writer primary model failed: %s", exc)
+        trace.append({"stage": "final_proposal_draft_and_compliance", "model_id": PROPOSAL_WRITER_MODEL_ID, "status": "failed", "error": type(exc).__name__})
+
+    if PROPOSAL_FALLBACK_MODEL_ID:
+        try:
+            draft, usage = _invoke_bedrock_text(
+                model_id=PROPOSAL_FALLBACK_MODEL_ID,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                max_tokens=PROPOSAL_FALLBACK_MAX_TOKENS,
+                temperature=0.18,
+                read_timeout_seconds=float(os.getenv("PROPOSAL_FALLBACK_READ_TIMEOUT_SECONDS", "8")),
+            )
+            trace.append({"stage": "cheap_fallback_draft", "model_id": PROPOSAL_FALLBACK_MODEL_ID, "status": "ok", "usage": usage})
+            return {
+                "draft": _ensure_proposal_disclaimer(draft, payload),
+                "generation_mode": "bedrock_fallback",
+                "model_trace": trace,
+            }
+        except Exception as exc:
+            LOGGER.warning("Proposal Writer fallback model failed: %s", exc)
+            trace.append({"stage": "cheap_fallback_draft", "model_id": PROPOSAL_FALLBACK_MODEL_ID, "status": "failed", "error": type(exc).__name__})
+
+    trace.append({"stage": "template_fallback", "status": "used"})
+    return {
+        "draft": template_draft,
+        "generation_mode": "deterministic_template_fallback",
+        "model_trace": trace,
+    }
+
+
+def _proposal_helper_outputs(payload: ProposalWriterRequest, trace: List[Dict[str, Any]]) -> tuple[str, str]:
+    section_prompt = _proposal_section_extraction_prompt(payload)
+    summary_prompt = _proposal_evidence_summary_prompt(payload)
+    section_context = _deterministic_section_context(payload)
+    evidence_summary = _deterministic_evidence_summary(payload)
+
+    def invoke_helper(stage: str, prompt: str) -> tuple[str, str, Dict[str, Any]]:
+        text, usage = _invoke_bedrock_text(
+            model_id=PROPOSAL_HELPER_MODEL_ID,
+            system_prompt=_proposal_helper_system_prompt(),
+            user_prompt=prompt,
+            max_tokens=900,
+            temperature=0.05,
+            read_timeout_seconds=PROPOSAL_HELPER_TIMEOUT_SECONDS,
+        )
+        return stage, text, {"stage": stage, "model_id": PROPOSAL_HELPER_MODEL_ID, "status": "ok", "usage": usage}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(invoke_helper, "section_l_m_extraction", section_prompt),
+            executor.submit(invoke_helper, "opportunity_evidence_summary", summary_prompt),
+        ]
+        for future in futures:
+            try:
+                stage, text, item = future.result(timeout=PROPOSAL_HELPER_TIMEOUT_SECONDS + 1)
+                if stage == "section_l_m_extraction":
+                    section_context = text
+                else:
+                    evidence_summary = text
+                trace.append(item)
+            except TimeoutError:
+                trace.append({"stage": "nova_lite_helper", "model_id": PROPOSAL_HELPER_MODEL_ID, "status": "timeout_using_deterministic_context"})
+            except Exception as exc:
+                LOGGER.info("Proposal Writer helper failed: %s", exc)
+                trace.append({"stage": "nova_lite_helper", "model_id": PROPOSAL_HELPER_MODEL_ID, "status": "failed_using_deterministic_context", "error": type(exc).__name__})
+
+    return section_context, evidence_summary
+
+
+def _invoke_bedrock_text(
+    *,
+    model_id: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int,
+    temperature: float,
+    read_timeout_seconds: float,
+) -> tuple[str, Dict[str, Any]]:
+    import boto3
+    from botocore.config import Config
+
+    client = boto3.client(
+        "bedrock-runtime",
+        config=Config(
+            connect_timeout=2,
+            read_timeout=read_timeout_seconds,
+            retries={"max_attempts": 2},
+        ),
+    )
+    response = client.converse(
+        modelId=model_id,
+        system=[{"text": system_prompt}],
+        messages=[{"role": "user", "content": [{"text": user_prompt}]}],
+        inferenceConfig={
+            "maxTokens": max_tokens,
+            "temperature": temperature,
+            "topP": 0.9,
+        },
+    )
+    parts = response.get("output", {}).get("message", {}).get("content", [])
+    text = "\n".join(str(part.get("text", "")) for part in parts if part.get("text"))
+    if not text.strip():
+        raise RuntimeError("Bedrock returned an empty proposal response.")
+    return text.strip(), _json_safe(response.get("usage") or {})
+
+
+def _proposal_writer_system_prompt() -> str:
+    return (
+        "You are GovCon CaptureOS Proposal Writer for government-contracting consultants. "
+        "Write polished, source-grounded proposal narrative in Markdown. "
+        "Do not claim legal advice, bid/no-bid authority, guaranteed award, certifications, clearances, or past performance that is not in the provided context. "
+        "Mark assumptions clearly. Include a compliance checklist. Return only Markdown."
+    )
+
+
+def _proposal_helper_system_prompt() -> str:
+    return (
+        "You prepare concise GovCon proposal context for a downstream drafting model. "
+        "Use only the provided context, keep missing items labeled as pending validation, and return tight Markdown bullets."
+    )
+
+
+def _proposal_section_extraction_prompt(payload: ProposalWriterRequest) -> str:
+    return (
+        "Extract proposal-critical Section L/M signals for the target section. "
+        "Return bullets for instructions, evaluation factors, required proof, risks, and missing source documents.\n\n"
+        f"Target section: {payload.target_section}\n"
+        f"Context JSON:\n{_proposal_context_json(payload, max_chars=18000)}"
+    )
+
+
+def _proposal_evidence_summary_prompt(payload: ProposalWriterRequest) -> str:
+    return (
+        "Summarize the opportunity, source-backed evidence, and customer fit for proposal drafting. "
+        "Return bullets grouped as Opportunity, Evidence, Customer Fit, Past Performance, and Assumptions.\n\n"
+        f"Target section: {payload.target_section}\n"
+        f"Context JSON:\n{_proposal_context_json(payload, max_chars=18000)}"
+    )
+
+
+def _proposal_writer_prompt(
+    payload: ProposalWriterRequest,
+    context: Mapping[str, Any],
+    section_context: str,
+    evidence_summary: str,
+    past_performance_match: str,
+) -> str:
+    return (
+        f"Draft the {payload.target_section} section for this opportunity.\n\n"
+        "Required output structure:\n"
+        f"# {payload.target_section}: {payload.opportunity_title}\n"
+        "## Decision Support Notice\n"
+        "## Source Context\n"
+        f"## Draft {payload.target_section}\n"
+        "## Evidence To Weave In\n"
+        "## Past Performance Anchors\n"
+        "## Assumptions To Validate\n"
+        "## Compliance Checklist\n\n"
+        "Decision support notice text to include exactly or near-exactly:\n"
+        f"{PROCUREMENT_DECISION_DISCLAIMER}\n\n"
+        f"Tenant/customer context: {context.get('tenant_name') or context.get('tenant_slug') or 'unknown'}\n\n"
+        "Nova Lite Section L/M extraction:\n"
+        f"{section_context}\n\n"
+        "Nova Lite opportunity and evidence summary:\n"
+        f"{evidence_summary}\n\n"
+        "Deterministic past performance matching:\n"
+        f"{past_performance_match}\n\n"
+        f"Compact source context JSON:\n{_proposal_context_json(payload, max_chars=26000)}"
+    )
+
+
+def _proposal_context_json(payload: ProposalWriterRequest, max_chars: int) -> str:
+    requirements = payload.rfp_requirements or {}
+    company_context = payload.company_past_performance or {}
+    opportunity = _as_mapping(requirements.get("opportunity"))
+    profile = _as_mapping(company_context.get("customer_profile"))
+    compact = {
+        "opportunity": {
+            key: opportunity.get(key)
+            for key in (
+                "opportunity_id",
+                "notice_id",
+                "title",
+                "funding_agency_name",
+                "funding_agency_code",
+                "naics_code",
+                "psc_code",
+                "set_aside_description",
+                "response_deadline",
+                "estimated_value_min",
+                "estimated_value_max",
+                "ui_link",
+                "description_url",
+            )
+        },
+        "section_l": requirements.get("section_l"),
+        "section_m": requirements.get("section_m"),
+        "recommended_action": requirements.get("recommended_action"),
+        "capture_tasks": _as_list(requirements.get("capture_tasks"))[:8],
+        "deliverables": _as_list(requirements.get("deliverables"))[:8],
+        "evidence": [_compact_evidence_item(item) for item in _as_list(requirements.get("evidence"))[:12]],
+        "customer_profile": {
+            key: profile.get(key)
+            for key in (
+                "company_name",
+                "tenant_name",
+                "target_naics_codes",
+                "target_psc_codes",
+                "target_agency_codes",
+                "contract_vehicles",
+                "clearance_levels",
+                "set_aside_eligibilities",
+                "socioeconomic_tags",
+            )
+        },
+        "past_performance": [_compact_past_performance_item(item) for item in _as_list(company_context.get("past_performance"))[:8]],
+        "fit_factors": _as_list(company_context.get("fit_factors"))[:8],
+    }
+    text = json.dumps(_json_safe(compact), default=str, separators=(",", ":"))
+    return text if len(text) <= max_chars else text[:max_chars] + "...[truncated]"
+
+
+def _compact_evidence_item(value: Any) -> Dict[str, Any]:
+    item = _as_mapping(value)
+    return {
+        "type": item.get("evidence_type"),
+        "system": item.get("source_system"),
+        "record_id": item.get("source_record_id"),
+        "title": item.get("source_title"),
+        "url": item.get("source_url"),
+        "date": item.get("source_record_date"),
+        "amount": item.get("source_amount"),
+        "agency": item.get("agency_name"),
+        "naics": item.get("naics_code"),
+        "psc": item.get("psc_code"),
+        "explanation": item.get("explanation"),
+    }
+
+
+def _compact_past_performance_item(value: Any) -> Dict[str, Any]:
+    item = _as_mapping(value)
+    return {
+        "contract_number": item.get("contract_number"),
+        "title": item.get("title"),
+        "role": item.get("role"),
+        "agency": item.get("agency_name"),
+        "naics": item.get("naics_code"),
+        "psc": item.get("psc_code"),
+        "amount": item.get("obligated_amount"),
+        "description": str(item.get("description") or "")[:900],
+    }
+
+
+def _deterministic_section_context(payload: ProposalWriterRequest) -> str:
+    requirements = payload.rfp_requirements or {}
+    return "\n".join(
+        [
+            "- Section L: " + str(requirements.get("section_l") or "Extraction pending; validate solicitation instructions before client delivery."),
+            "- Section M: " + str(requirements.get("section_m") or "Extraction pending; validate evaluation factors before client delivery."),
+            f"- Target section: {payload.target_section}.",
+        ]
+    )
+
+
+def _deterministic_evidence_summary(payload: ProposalWriterRequest) -> str:
+    requirements = payload.rfp_requirements or {}
+    opportunity = _as_mapping(requirements.get("opportunity"))
+    evidence = [_as_mapping(item) for item in _as_list(requirements.get("evidence"))]
+    lines = [
+        f"- Opportunity: {opportunity.get('title') or payload.opportunity_title}.",
+        f"- Agency: {opportunity.get('funding_agency_name') or '--'}.",
+        f"- NAICS/PSC: {opportunity.get('naics_code') or '--'} / {opportunity.get('psc_code') or '--'}.",
+    ]
+    lines.extend(_proposal_evidence_lines(evidence[:5]))
+    return "\n".join(lines)
+
+
+def _proposal_past_performance_match_summary(payload: ProposalWriterRequest) -> str:
+    requirements = payload.rfp_requirements or {}
+    company_context = payload.company_past_performance or {}
+    opportunity = _as_mapping(requirements.get("opportunity"))
+    rows = [_as_mapping(item) for item in _as_list(company_context.get("past_performance"))]
+    if not rows:
+        return "- No imported customer past performance was available; request verified client references before client delivery."
+
+    def score(row: Mapping[str, Any]) -> float:
+        value = 0.25
+        if row.get("naics_code") and row.get("naics_code") == opportunity.get("naics_code"):
+            value += 0.3
+        if row.get("psc_code") and row.get("psc_code") == opportunity.get("psc_code"):
+            value += 0.2
+        if row.get("agency_name") and row.get("agency_name") == opportunity.get("funding_agency_name"):
+            value += 0.2
+        if row.get("obligated_amount"):
+            value += 0.05
+        return min(1.0, value)
+
+    ranked = sorted(rows, key=score, reverse=True)[:5]
+    return "\n".join(
+        f"- {row.get('title') or row.get('contract_number')}: deterministic relevance {score(row):.0%}; "
+        f"{row.get('agency_name') or 'Agency pending'}; {row.get('naics_code') or '--'}/{row.get('psc_code') or '--'}; {_format_money(row.get('obligated_amount'))}."
+        for row in ranked
+    )
+
+
+def _ensure_proposal_disclaimer(draft: str, payload: ProposalWriterRequest) -> str:
+    text = draft.strip()
+    if "Decision Support Notice" not in text:
+        text = f"# {payload.target_section}: {payload.opportunity_title}\n\n## Decision Support Notice\n{PROCUREMENT_DECISION_DISCLAIMER}\n\n{text}"
+    if "Compliance Checklist" not in text:
+        text += (
+            "\n\n## Compliance Checklist\n"
+            "- Confirm Section L instructions, page limits, file format, and required volumes.\n"
+            "- Confirm Section M evaluation factors and relative importance.\n"
+            "- Confirm all claims are supported by client evidence and source records.\n"
+            "- Confirm pricing, eligibility, representations, and submission compliance outside this drafting assistant."
+        )
+    return text
 
 
 def _render_proposal_writer_markdown(payload: ProposalWriterRequest, context: Mapping[str, Any]) -> str:

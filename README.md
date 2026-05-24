@@ -22,7 +22,7 @@ The deployed demo intentionally keeps cost low: Cloudflare Pages serves the stat
 - Compute: AWS Lambda on ARM64 behind API Gateway v2 HTTP API.
 - Data: Amazon RDS PostgreSQL 15, `pgvector`, `pg_trgm`, JSONB, generated search columns, HNSW vector index.
 - Async jobs: DynamoDB on-demand table for Proposal Writer job state and history.
-- AI: Amazon Bedrock for proposal drafting and optional SAM.gov SOW embedding enrichment, with deterministic/template fallbacks.
+- AI: Amazon Bedrock Proposal Writer with Claude Sonnet (`us.anthropic.claude-sonnet-4-6`) for final proposal drafts, Amazon Nova Lite (`amazon.nova-lite-v1:0`) for lower-cost Section L/M extraction and evidence summarization, Nova Pro fallback, and deterministic/template fallbacks.
 - Ingestion: SAM.gov opportunities, USAspending awards/subawards, FSRS-derived subaward signals, and GSA CALC+ labor-rate benchmarks.
 - Infrastructure: Terraform, EventBridge Scheduler, Secrets Manager, CloudWatch alarms, GitHub Actions, Wrangler/Cloudflare Pages.
 - Billing/auth readiness: Stripe Checkout/webhooks and JWT/JWKS enforcement switches are implemented but not enabled for the public demo.
@@ -31,7 +31,7 @@ The deployed demo intentionally keeps cost low: Cloudflare Pages serves the stat
 
 - Multi-tenant GovCon workflow: tenant and user context, client profile rollups, readiness scoring, capture workflow state, notes, reminders, and branded report settings.
 - Source-backed capture analysis: live opportunity records, market P-win, client-adjusted P-win, evidence bundles, score-factor explanations, competitor/partner signals, CALC+ pricing context, and source drilldowns.
-- Proposal Writer: async Bedrock-backed proposal jobs with Section L/M context extraction, citation-ready prompts, source evidence, client past-performance mapping, saved draft history, and client-side PDF/DOCX export.
+- Proposal Writer: async Bedrock-backed proposal jobs that use Nova Lite for fast, lower-cost preprocessing and Claude Sonnet for higher-quality final drafting, with citation-ready prompts, source evidence, client past-performance mapping, saved draft history, and client-side PDF/DOCX export.
 - Low-cost cloud architecture: no NAT Gateway, no Aurora Serverless, no OpenSearch, no provisioned concurrency, bounded Lambda memory, short log retention, and on-demand DynamoDB.
 - No-NAT ingestion pattern: public fetch Lambdas call public APIs and invoke private upsert Lambdas that write to private RDS, keeping database access private without paying for NAT.
 - Production controls: Terraform switches for JWT auth, API Gateway authorizer, Stripe secrets, SAM.gov secret ingestion, EventBridge schedules, and optional CloudWatch alarms.

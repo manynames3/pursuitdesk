@@ -30,7 +30,7 @@ flowchart LR
     sam["SAM.gov\nOpportunities"]
     usaspending["USAspending / FSRS\nAwards + subawards"]
     calc["GSA CALC+\nLabor rates"]
-    bedrock["Amazon Bedrock\nDrafting + embeddings"]
+    bedrock["Amazon Bedrock\nClaude Sonnet drafts\nNova Lite helpers\nEmbeddings"]
     stripe["Stripe\nCheckout + webhooks"]
   end
 
@@ -66,7 +66,7 @@ flowchart LR
 4. Capture analysis combines live SAM.gov opportunity fields with historical award/subaward evidence, partner signals, CALC+ rates, pgvector/SOW signals when present, and client profile fit.
 5. Go/no-go decisions, notes, reminders, past-performance imports, white-label settings, and workflow updates are persisted in PostgreSQL.
 6. Proposal Writer requests create DynamoDB job records and invoke the non-VPC Proposal Writer Lambda asynchronously.
-7. The Proposal Writer Lambda uses Bedrock helper/final models when configured, falls back when needed, stores draft text in the DynamoDB job record, and exposes list/detail polling endpoints.
+7. The Proposal Writer Lambda uses Amazon Nova Lite (`amazon.nova-lite-v1:0`) for lower-cost Section L/M extraction and evidence summarization, then Claude Sonnet (`us.anthropic.claude-sonnet-4-6`) for higher-quality final proposal drafting. It falls back when needed, stores draft text in the DynamoDB job record, and exposes list/detail polling endpoints.
 8. The frontend renders saved proposal history and generates PDF/DOCX exports client-side from draft markdown.
 
 ## Data Ingestion Flow
@@ -84,6 +84,12 @@ flowchart LR
 - Terraform in `infra/terraform/` provisions API Gateway, Lambda, RDS, DynamoDB, IAM, EventBridge Scheduler, Secrets Manager references, and optional alarms.
 - GitHub Actions can deploy the frontend when Cloudflare credentials are configured.
 - Database migrations and demo seeding are run through the `db_admin` Lambda.
+
+## Proposal Model Routing
+
+- Nova Lite handles short helper tasks: extracting Section L/M signals, summarizing opportunity evidence, and preparing compact context for the final model.
+- Claude Sonnet handles final proposal narrative because that step needs stronger long-form writing, instruction following, and source-grounded synthesis.
+- Nova Pro and deterministic templates are fallback paths so proposal generation can degrade gracefully if the primary Sonnet call is unavailable.
 
 ## Key Constraints
 

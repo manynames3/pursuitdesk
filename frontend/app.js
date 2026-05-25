@@ -152,6 +152,7 @@ let customerTeams = [...fallbackTeams];
 let selectedTenantSlug = localStorage.getItem("captureosTenantSlug") || "demo-growth";
 let consultantWorkspace = null;
 let decisionSavePending = false;
+const backgroundProposalJobs = new Map();
 
 const els = {
   apiStatus: document.querySelector("#api-status"),
@@ -176,6 +177,7 @@ const els = {
   proposalLoadingStatus: document.querySelector("#proposal-loading-status"),
   proposalOutput: document.querySelector("#proposal-output"),
   proposalError: document.querySelector("#proposal-error"),
+  proposalNotifications: document.querySelector("#proposal-notifications"),
   proposalLibrary: document.querySelector("#proposal-library"),
   proposalHistory: document.querySelector("#proposal-history"),
   exportBrief: document.querySelector("#export-brief"),
@@ -295,6 +297,7 @@ els.proposalCopy.addEventListener("click", copyProposalDraft);
 els.proposalDownloadDocx.addEventListener("click", downloadProposalDocx);
 els.proposalDownloadPdf.addEventListener("click", downloadProposalPdf);
 els.proposalOutput.addEventListener("input", syncProposalDraftActions);
+els.proposalNotifications.addEventListener("click", handleProposalNotificationAction);
 els.proposalLibrary.addEventListener("click", handleProposalHistoryAction);
 els.proposalHistory.addEventListener("click", handleProposalHistoryAction);
 document.addEventListener("keydown", (event) => {
@@ -582,19 +585,29 @@ async function generateProposalDraft() {
       body: JSON.stringify(payload),
     });
     if (response.job_id) {
-      setProposalGenerating(true, "Drafting and quality-checking the proposal...");
-      const job = await pollProposalWriterJob(response.job_id);
-      setProposalDraft(job.draft || renderLocalProposalDraft(payload));
-      setProposalError(isQualityCheckedDraft(job.generation_mode) ? "" : "AI drafting did not pass the quality gate; showing the best available safe fallback draft.");
+      setProposalGenerating(false);
+      closeProposalWriter();
+      showProposalNotification({
+        type: "info",
+        title: "Proposal draft started",
+        message: "Keep working in PursuitDesk. A notification will appear here when the draft is ready.",
+        jobId: response.job_id,
+        action: "proposals",
+        actionLabel: "View history",
+      });
+      trackBackgroundProposalJob(response.job_id, payload);
+      refreshProposalHistories().catch(() => {});
+      setApiStatus("Live API");
+      return;
     } else {
       setProposalDraft(response.draft || renderLocalProposalDraft(payload));
+      setProposalGenerating(false);
+      await refreshProposalHistories();
     }
-    await refreshProposalHistories();
     setApiStatus("Live API");
   } catch (error) {
     setProposalDraft(renderLocalProposalDraft(payload));
     setProposalError("Live proposal job did not complete; showing a local structured draft from the active opportunity context.");
-  } finally {
     setProposalGenerating(false);
   }
 }
@@ -606,7 +619,7 @@ async function refreshProposalHistories() {
   ]);
 }
 
-async function pollProposalWriterJob(jobId) {
+async function pollProposalWriterJob(jobId, { updateDrawer = true } = {}) {
   const startedAt = Date.now();
   const timeoutMs = 330000;
   let lastStatus = "queued";
@@ -621,11 +634,43 @@ async function pollProposalWriterJob(jobId) {
     if (lastStatus === "failed") {
       throw new Error(job.error || "Proposal Writer job failed");
     }
-    setProposalGenerating(true, lastStatus === "running"
-      ? "Sonnet is drafting the final narrative..."
-      : "Queued for compliant proposal drafting...");
+    if (updateDrawer) {
+      setProposalGenerating(true, lastStatus === "running"
+        ? "Drafting and quality-checking the proposal..."
+        : "Queued for compliant proposal drafting...");
+    }
   }
   throw new Error("Proposal Writer job timed out");
+}
+
+function trackBackgroundProposalJob(jobId, payload) {
+  if (!jobId || backgroundProposalJobs.has(jobId)) return;
+  backgroundProposalJobs.set(jobId, { payload, startedAt: Date.now() });
+  pollProposalWriterJob(jobId, { updateDrawer: false })
+    .then(async (job) => {
+      backgroundProposalJobs.delete(jobId);
+      await refreshProposalHistories();
+      showProposalNotification({
+        type: "success",
+        title: "Proposal draft ready",
+        message: job.opportunity_title || payload.opportunity_title || "Your draft is ready to review and export.",
+        jobId,
+        action: "open",
+        actionLabel: "Open draft",
+      });
+    })
+    .catch(async (error) => {
+      backgroundProposalJobs.delete(jobId);
+      await refreshProposalHistories();
+      showProposalNotification({
+        type: "error",
+        title: "Proposal draft needs attention",
+        message: error.message || "The drafting job did not complete. Check proposal history or try again.",
+        jobId,
+        action: "proposals",
+        actionLabel: "View history",
+      });
+    });
 }
 
 async function loadProposalLibrary() {
@@ -735,6 +780,63 @@ async function handleProposalHistoryAction(event) {
   } finally {
     button.disabled = false;
     button.textContent = originalText;
+  }
+}
+
+function showProposalNotification({ type = "info", title, message, jobId = "", action = "", actionLabel = "" }) {
+  if (!els.proposalNotifications) return;
+  els.proposalNotifications.innerHTML = `
+    <section class="proposal-notification ${escapeHtml(type)}" role="status">
+      <div>
+        <strong>${escapeHtml(title || "Proposal update")}</strong>
+        <p>${escapeHtml(message || "")}</p>
+      </div>
+      <div class="proposal-notification-actions">
+        ${action ? `<button class="secondary compact-button" type="button" data-proposal-notification-action="${escapeHtml(action)}" data-job-id="${escapeHtml(jobId)}">${escapeHtml(actionLabel || "Open")}</button>` : ""}
+        <button class="icon-button" type="button" aria-label="Dismiss notification" data-proposal-notification-action="dismiss">
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+async function handleProposalNotificationAction(event) {
+  const button = event.target.closest("[data-proposal-notification-action]");
+  if (!button) return;
+  const action = button.dataset.proposalNotificationAction;
+  if (action === "dismiss") {
+    els.proposalNotifications.innerHTML = "";
+    return;
+  }
+  if (action === "proposals") {
+    window.location.hash = "#proposal-history";
+    els.proposalNotifications.innerHTML = "";
+    return;
+  }
+  if (action === "open" && button.dataset.jobId) {
+    button.disabled = true;
+    button.textContent = "Opening...";
+    try {
+      const job = await fetchProposalJob(button.dataset.jobId);
+      if (!job.draft) throw new Error("Proposal draft is not available.");
+      await openProposalJob(job);
+      els.proposalNotifications.innerHTML = "";
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = "Open draft";
+      showProposalNotification({
+        type: "error",
+        title: "Draft is not available yet",
+        message: "The job is still finishing or could not be loaded. Check proposal history in a moment.",
+        jobId: button.dataset.jobId,
+        action: "proposals",
+        actionLabel: "View history",
+      });
+    }
   }
 }
 

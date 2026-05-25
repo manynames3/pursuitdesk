@@ -558,7 +558,7 @@ async function generateProposalDraft() {
   if (!currentOpportunityId) return;
 
   const payload = buildProposalWriterPayload();
-  setProposalGenerating(true, "Submitting Sonnet drafting job...");
+  setProposalGenerating(true, "Submitting proposal drafting job...");
   setProposalError("");
 
   try {
@@ -568,10 +568,10 @@ async function generateProposalDraft() {
       body: JSON.stringify(payload),
     });
     if (response.job_id) {
-      setProposalGenerating(true, "Sonnet is drafting the final narrative...");
+      setProposalGenerating(true, "Drafting and quality-checking the proposal...");
       const job = await pollProposalWriterJob(response.job_id);
       setProposalDraft(job.draft || renderLocalProposalDraft(payload));
-      setProposalError(job.generation_mode === "bedrock_sonnet" ? "" : "Sonnet did not complete; showing the best available fallback draft.");
+      setProposalError(isQualityCheckedDraft(job.generation_mode) ? "" : "AI drafting did not pass the quality gate; showing the best available safe fallback draft.");
     } else {
       setProposalDraft(response.draft || renderLocalProposalDraft(payload));
     }
@@ -754,9 +754,14 @@ function formatProposalJobDate(job) {
 
 function formatGenerationMode(mode) {
   if (!mode) return "AI draft";
+  if (String(mode).includes("haiku")) return "Haiku draft";
   if (String(mode).includes("sonnet")) return "Sonnet draft";
   if (String(mode).includes("nova")) return "Nova draft";
   return "AI draft";
+}
+
+function isQualityCheckedDraft(mode) {
+  return String(mode || "").includes("quality_checked") || String(mode || "").includes("quality_escalated");
 }
 
 function proposalJobStatusClass(status) {

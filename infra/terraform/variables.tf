@@ -100,13 +100,15 @@ variable "lambda_functions" {
       timeout      = 300
       vpc_enabled  = false
       environment = {
-        AWS_USE_DUALSTACK_ENDPOINT             = "false"
-        LOG_LEVEL                              = "INFO"
-        PROPOSAL_FALLBACK_MAX_TOKENS           = "2200"
-        PROPOSAL_FALLBACK_READ_TIMEOUT_SECONDS = "30"
-        PROPOSAL_HELPER_TIMEOUT_SECONDS        = "8"
-        PROPOSAL_WRITER_MAX_TOKENS             = "2800"
-        PROPOSAL_WRITER_READ_TIMEOUT_SECONDS   = "240"
+        AWS_USE_DUALSTACK_ENDPOINT               = "false"
+        LOG_LEVEL                                = "INFO"
+        PROPOSAL_ESCALATION_MAX_TOKENS           = "2800"
+        PROPOSAL_ESCALATION_READ_TIMEOUT_SECONDS = "240"
+        PROPOSAL_FALLBACK_MAX_TOKENS             = "2200"
+        PROPOSAL_FALLBACK_READ_TIMEOUT_SECONDS   = "30"
+        PROPOSAL_HELPER_TIMEOUT_SECONDS          = "8"
+        PROPOSAL_WRITER_MAX_TOKENS               = "2000"
+        PROPOSAL_WRITER_READ_TIMEOUT_SECONDS     = "240"
       }
     }
 
@@ -277,7 +279,13 @@ variable "proposal_writer_provider" {
 }
 
 variable "proposal_writer_model_id" {
-  description = "Bedrock model ID or inference profile for final Proposal Writer drafts."
+  description = "Bedrock model ID or inference profile for fast Proposal Writer drafts."
+  type        = string
+  default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+}
+
+variable "proposal_escalation_model_id" {
+  description = "Bedrock model ID or inference profile for quality escalation when the fast Proposal Writer draft does not pass checks."
   type        = string
   default     = "us.anthropic.claude-sonnet-4-6"
 }

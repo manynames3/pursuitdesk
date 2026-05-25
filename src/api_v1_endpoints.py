@@ -48,9 +48,11 @@ PROPOSAL_WRITER_PROVIDER = os.getenv("PROPOSAL_WRITER_PROVIDER", "template").str
 PROPOSAL_WRITER_MODEL_ID = os.getenv("PROPOSAL_WRITER_MODEL_ID", os.getenv("BEDROCK_MODEL_ID", ""))
 PROPOSAL_HELPER_MODEL_ID = os.getenv("PROPOSAL_HELPER_MODEL_ID", "amazon.nova-lite-v1:0")
 PROPOSAL_FALLBACK_MODEL_ID = os.getenv("PROPOSAL_FALLBACK_MODEL_ID", "amazon.nova-pro-v1:0")
+PROPOSAL_ESCALATION_MODEL_ID = os.getenv("PROPOSAL_ESCALATION_MODEL_ID", "").strip()
 PROPOSAL_HELPER_TIMEOUT_SECONDS = float(os.getenv("PROPOSAL_HELPER_TIMEOUT_SECONDS", "5"))
 PROPOSAL_WRITER_MAX_TOKENS = int(os.getenv("PROPOSAL_WRITER_MAX_TOKENS", "2800"))
 PROPOSAL_FALLBACK_MAX_TOKENS = int(os.getenv("PROPOSAL_FALLBACK_MAX_TOKENS", "2200"))
+PROPOSAL_ESCALATION_MAX_TOKENS = int(os.getenv("PROPOSAL_ESCALATION_MAX_TOKENS", str(PROPOSAL_WRITER_MAX_TOKENS)))
 PROCUREMENT_DECISION_DISCLAIMER = (
     "Decision support only. PursuitDesk does not provide legal advice, procurement advice, bid/no-bid directives, "
     "or a guarantee of award. Consultants remain responsible for validating source records, FAR/agency requirements, "
@@ -3280,50 +3282,156 @@ def _generate_proposal_writer_response(payload: ProposalWriterRequest, context: 
     past_performance_match = _proposal_past_performance_match_summary(payload)
     prompt = _proposal_writer_prompt(payload, context, section_context, evidence_summary, past_performance_match)
     system_prompt = _proposal_writer_system_prompt()
-    try:
-        draft, usage = _invoke_bedrock_text(
-            model_id=PROPOSAL_WRITER_MODEL_ID,
-            system_prompt=system_prompt,
-            user_prompt=prompt,
-            max_tokens=PROPOSAL_WRITER_MAX_TOKENS,
-            temperature=0.22,
-            read_timeout_seconds=float(os.getenv("PROPOSAL_WRITER_READ_TIMEOUT_SECONDS", "20")),
+    result = _try_proposal_model(
+        payload=payload,
+        trace=trace,
+        model_id=PROPOSAL_WRITER_MODEL_ID,
+        system_prompt=system_prompt,
+        user_prompt=prompt,
+        stage="fast_proposal_draft",
+        generation_mode=_proposal_generation_mode(PROPOSAL_WRITER_MODEL_ID, "quality_checked"),
+        max_tokens=PROPOSAL_WRITER_MAX_TOKENS,
+        temperature=0.22,
+        read_timeout_seconds=float(os.getenv("PROPOSAL_WRITER_READ_TIMEOUT_SECONDS", "20")),
+    )
+    if result:
+        return result
+
+    if PROPOSAL_ESCALATION_MODEL_ID and PROPOSAL_ESCALATION_MODEL_ID != PROPOSAL_WRITER_MODEL_ID:
+        escalation_prompt = (
+            prompt
+            + "\n\nQuality gate instruction: the fast draft did not pass PursuitDesk's proposal-readiness checks. "
+            "Return a complete, concise, source-grounded revised draft that includes every required heading, citation notes, "
+            "past-performance mapping, assumptions, and compliance checklist items. Do not invent unsupported facts."
         )
-        trace.append({"stage": "final_proposal_draft_and_compliance", "model_id": PROPOSAL_WRITER_MODEL_ID, "status": "ok", "usage": usage})
-        return {
-            "draft": _ensure_proposal_disclaimer(draft, payload),
-            "generation_mode": "bedrock_sonnet",
-            "model_trace": trace,
-        }
-    except Exception as exc:
-        LOGGER.warning("Proposal Writer primary model failed: %s", exc)
-        trace.append({"stage": "final_proposal_draft_and_compliance", "model_id": PROPOSAL_WRITER_MODEL_ID, "status": "failed", "error": type(exc).__name__})
+        result = _try_proposal_model(
+            payload=payload,
+            trace=trace,
+            model_id=PROPOSAL_ESCALATION_MODEL_ID,
+            system_prompt=system_prompt,
+            user_prompt=escalation_prompt,
+            stage="quality_escalation_draft",
+            generation_mode=_proposal_generation_mode(PROPOSAL_ESCALATION_MODEL_ID, "quality_escalated"),
+            max_tokens=PROPOSAL_ESCALATION_MAX_TOKENS,
+            temperature=0.18,
+            read_timeout_seconds=float(os.getenv("PROPOSAL_ESCALATION_READ_TIMEOUT_SECONDS", "30")),
+        )
+        if result:
+            return result
 
     if PROPOSAL_FALLBACK_MODEL_ID:
-        try:
-            draft, usage = _invoke_bedrock_text(
-                model_id=PROPOSAL_FALLBACK_MODEL_ID,
-                system_prompt=system_prompt,
-                user_prompt=prompt,
-                max_tokens=PROPOSAL_FALLBACK_MAX_TOKENS,
-                temperature=0.18,
-                read_timeout_seconds=float(os.getenv("PROPOSAL_FALLBACK_READ_TIMEOUT_SECONDS", "8")),
-            )
-            trace.append({"stage": "cheap_fallback_draft", "model_id": PROPOSAL_FALLBACK_MODEL_ID, "status": "ok", "usage": usage})
-            return {
-                "draft": _ensure_proposal_disclaimer(draft, payload),
-                "generation_mode": "bedrock_fallback",
-                "model_trace": trace,
-            }
-        except Exception as exc:
-            LOGGER.warning("Proposal Writer fallback model failed: %s", exc)
-            trace.append({"stage": "cheap_fallback_draft", "model_id": PROPOSAL_FALLBACK_MODEL_ID, "status": "failed", "error": type(exc).__name__})
+        result = _try_proposal_model(
+            payload=payload,
+            trace=trace,
+            model_id=PROPOSAL_FALLBACK_MODEL_ID,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            stage="cheap_fallback_draft",
+            generation_mode=_proposal_generation_mode(PROPOSAL_FALLBACK_MODEL_ID, "fallback"),
+            max_tokens=PROPOSAL_FALLBACK_MAX_TOKENS,
+            temperature=0.18,
+            read_timeout_seconds=float(os.getenv("PROPOSAL_FALLBACK_READ_TIMEOUT_SECONDS", "8")),
+        )
+        if result:
+            return result
 
     trace.append({"stage": "template_fallback", "status": "used"})
     return {
         "draft": template_draft,
         "generation_mode": "deterministic_template_fallback",
         "model_trace": trace,
+    }
+
+
+def _try_proposal_model(
+    *,
+    payload: ProposalWriterRequest,
+    trace: List[Dict[str, Any]],
+    model_id: str,
+    system_prompt: str,
+    user_prompt: str,
+    stage: str,
+    generation_mode: str,
+    max_tokens: int,
+    temperature: float,
+    read_timeout_seconds: float,
+) -> Optional[Dict[str, Any]]:
+    try:
+        draft, usage = _invoke_bedrock_text(
+            model_id=model_id,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            read_timeout_seconds=read_timeout_seconds,
+        )
+        trace.append({"stage": stage, "model_id": model_id, "status": "ok", "usage": usage})
+    except Exception as exc:
+        LOGGER.warning("Proposal Writer model failed at %s: %s", stage, exc)
+        trace.append({"stage": stage, "model_id": model_id, "status": "failed", "error": type(exc).__name__})
+        return None
+
+    quality = _proposal_quality_report(draft, payload)
+    trace.append(
+        {
+            "stage": f"{stage}_quality_gate",
+            "model_id": model_id,
+            "status": "passed" if quality["passed"] else "failed",
+            **quality,
+        }
+    )
+    if not quality["passed"]:
+        return None
+    return {
+        "draft": _ensure_proposal_disclaimer(draft, payload),
+        "generation_mode": generation_mode,
+        "model_trace": trace,
+    }
+
+
+def _proposal_generation_mode(model_id: str, suffix: str) -> str:
+    normalized = (model_id or "").lower()
+    if "haiku" in normalized:
+        family = "haiku"
+    elif "sonnet" in normalized:
+        family = "sonnet"
+    elif "nova" in normalized:
+        family = "nova"
+    else:
+        family = "bedrock"
+    return f"bedrock_{family}_{suffix}"
+
+
+def _proposal_quality_report(draft: str, payload: ProposalWriterRequest) -> Dict[str, Any]:
+    text = draft.strip()
+    lowered = text.lower()
+    required_markers = [
+        "decision support notice",
+        "source context",
+        f"draft {payload.target_section}".lower(),
+        "evidence",
+        "past performance",
+        "assumptions",
+        "compliance checklist",
+    ]
+    missing = [marker for marker in required_markers if marker not in lowered]
+    word_count = len(text.split())
+    source_grounded = "[source:" in lowered or "source:" in lowered or "sam.gov" in lowered
+    enough_substance = word_count >= 450
+    checklist_bullets = lowered.split("compliance checklist", 1)[-1].count("-") if "compliance checklist" in lowered else 0
+    if not source_grounded:
+        missing.append("source citation notes")
+    if not enough_substance:
+        missing.append("minimum proposal substance")
+    if checklist_bullets < 3:
+        missing.append("compliance checklist bullets")
+    return {
+        "passed": not missing,
+        "missing": missing,
+        "word_count": word_count,
+        "min_word_count": 450,
+        "source_grounded": source_grounded,
+        "compliance_checklist_bullets": checklist_bullets,
     }
 
 
@@ -3491,6 +3599,7 @@ def _proposal_writer_prompt(
         "- Separate confirmed Section M evaluation criteria from advisory win themes.\n"
         "- Map each past performance anchor to a concrete agency, NAICS, PSC, scope, role, value, or evaluation factor match when available.\n"
         "- Do not invent document text, page limits, certifications, key personnel, clearances, ratings, or client results.\n\n"
+        "- Keep the first draft concise: target 700-1,100 words unless the provided context requires more.\n\n"
         "Decision support notice text to include exactly or near-exactly:\n"
         f"{PROCUREMENT_DECISION_DISCLAIMER}\n\n"
         f"Tenant/customer context: {context.get('tenant_name') or context.get('tenant_slug') or 'unknown'}\n\n"

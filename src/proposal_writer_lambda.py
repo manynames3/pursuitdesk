@@ -76,7 +76,7 @@ def _submit_proposal_writer_job(event: Mapping[str, Any], payload: ProposalWrite
         {
             "job_id": job_id,
             "status": "queued",
-            "generation_mode": "async_bedrock_sonnet_job",
+            "generation_mode": "async_bedrock_proposal_job",
             "target_section": payload.target_section,
             "opportunity_id": payload.opportunity_id,
             "poll_url": f"/api/v1/proposal-writer/jobs/{job_id}",
@@ -249,7 +249,7 @@ def _job_public_payload(item: Mapping[str, Any]) -> Dict[str, Any]:
         "updated_at": item.get("updated_at"),
         "started_at": item.get("started_at"),
         "completed_at": item.get("completed_at"),
-        "generation_mode": item.get("generation_mode") or "async_bedrock_sonnet_job",
+        "generation_mode": item.get("generation_mode") or "async_bedrock_proposal_job",
         "has_draft": bool(str(item.get("draft") or "").strip()),
         "legal_disclaimer": _procurement_decision_disclaimer(),
     }
@@ -273,7 +273,7 @@ def _job_summary_payload(item: Mapping[str, Any]) -> Dict[str, Any]:
         "updated_at": item.get("updated_at"),
         "started_at": item.get("started_at"),
         "completed_at": item.get("completed_at"),
-        "generation_mode": item.get("generation_mode") or "async_bedrock_sonnet_job",
+        "generation_mode": item.get("generation_mode") or "async_bedrock_proposal_job",
         "has_draft": bool(str(item.get("draft") or "").strip()),
     }
     if item.get("error"):

@@ -152,6 +152,7 @@ let customerTeams = [...fallbackTeams];
 let selectedTenantSlug = localStorage.getItem("captureosTenantSlug") || "demo-growth";
 let consultantWorkspace = null;
 let decisionSavePending = false;
+let proposalOutputMode = "preview";
 const backgroundProposalJobs = new Map();
 
 const els = {
@@ -176,6 +177,9 @@ const els = {
   proposalLoading: document.querySelector("#proposal-loading"),
   proposalLoadingStatus: document.querySelector("#proposal-loading-status"),
   proposalOutput: document.querySelector("#proposal-output"),
+  proposalPreview: document.querySelector("#proposal-preview"),
+  proposalViewPreview: document.querySelector("#proposal-view-preview"),
+  proposalViewEdit: document.querySelector("#proposal-view-edit"),
   proposalError: document.querySelector("#proposal-error"),
   proposalNotifications: document.querySelector("#proposal-notifications"),
   proposalLibrary: document.querySelector("#proposal-library"),
@@ -235,6 +239,10 @@ const els = {
   recommendedAction: document.querySelector("#recommended-action"),
   recommendedRationale: document.querySelector("#recommended-rationale"),
   decisionDrivers: document.querySelector("#decision-drivers"),
+  summaryMatters: document.querySelector("#summary-matters"),
+  summaryPursue: document.querySelector("#summary-pursue"),
+  summaryRisks: document.querySelector("#summary-risks"),
+  summaryEvidence: document.querySelector("#summary-evidence"),
   captureTasks: document.querySelector("#capture-tasks"),
   opportunityDeliverables: document.querySelector("#opportunity-deliverables"),
   confidence: document.querySelector("#confidence"),
@@ -293,6 +301,8 @@ els.proposalSectionCards.addEventListener("click", (event) => {
   if (card) selectProposalSection(card.dataset.proposalSection);
 });
 els.proposalGenerate.addEventListener("click", generateProposalDraft);
+els.proposalViewPreview.addEventListener("click", () => setProposalOutputMode("preview"));
+els.proposalViewEdit.addEventListener("click", () => setProposalOutputMode("edit"));
 els.proposalCopy.addEventListener("click", copyProposalDraft);
 els.proposalDownloadDocx.addEventListener("click", downloadProposalDocx);
 els.proposalDownloadPdf.addEventListener("click", downloadProposalPdf);
@@ -767,11 +777,11 @@ async function handleProposalHistoryAction(event) {
     const job = await fetchProposalJob(jobId);
     if (!job.draft) throw new Error("Proposal draft is not available.");
     if (action === "pdf") {
-      downloadBlob(createPdfBlob(job.draft), `${proposalJobFilename(job)}.pdf`);
+      downloadBlob(createPdfBlob(normalizeProposalMarkdown(job.draft)), `${proposalJobFilename(job)}.pdf`);
       return;
     }
     if (action === "docx") {
-      downloadBlob(createDocxBlob(job.draft), `${proposalJobFilename(job)}.docx`);
+      downloadBlob(createDocxBlob(normalizeProposalMarkdown(job.draft)), `${proposalJobFilename(job)}.docx`);
       return;
     }
     await openProposalJob(job);
@@ -924,23 +934,72 @@ function setProposalGenerating(isGenerating, statusText = "Architecting Complian
   els.proposalDownloadDocx.disabled = isGenerating || !els.proposalOutput.value.trim();
   els.proposalDownloadPdf.disabled = isGenerating || !els.proposalOutput.value.trim();
   els.proposalLoading.hidden = !isGenerating;
-  els.proposalOutput.hidden = isGenerating;
   els.proposalLoadingStatus.textContent = statusText;
   els.proposalGenerate.innerHTML = isGenerating
     ? `<span class="proposal-spinner" aria-hidden="true"></span>Generating...`
     : `<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z" /></svg>Generate Draft`;
+  syncProposalDraftActions();
 }
 
 function setProposalDraft(text) {
   els.proposalOutput.value = text || "";
+  proposalOutputMode = text ? "preview" : "edit";
+  syncProposalDraftActions();
+}
+
+function setProposalOutputMode(mode) {
+  proposalOutputMode = mode === "edit" ? "edit" : "preview";
   syncProposalDraftActions();
 }
 
 function syncProposalDraftActions() {
   const hasDraft = Boolean(els.proposalOutput.value.trim());
-  els.proposalCopy.disabled = !hasDraft;
-  els.proposalDownloadDocx.disabled = !hasDraft;
-  els.proposalDownloadPdf.disabled = !hasDraft;
+  const isGenerating = !els.proposalLoading.hidden;
+  renderProposalPreview(els.proposalOutput.value);
+  els.proposalCopy.disabled = isGenerating || !hasDraft;
+  els.proposalDownloadDocx.disabled = isGenerating || !hasDraft;
+  els.proposalDownloadPdf.disabled = isGenerating || !hasDraft;
+  els.proposalViewPreview.disabled = isGenerating || !hasDraft;
+  els.proposalViewEdit.disabled = isGenerating;
+  els.proposalViewPreview.classList.toggle("is-active", proposalOutputMode === "preview");
+  els.proposalViewEdit.classList.toggle("is-active", proposalOutputMode === "edit");
+  els.proposalPreview.hidden = isGenerating || proposalOutputMode !== "preview";
+  els.proposalOutput.hidden = isGenerating || proposalOutputMode !== "edit";
+}
+
+function renderProposalPreview(markdown) {
+  const blocks = proposalMarkdownBlocks(markdown).filter((block) => block.type !== "blank");
+  if (!blocks.length) {
+    els.proposalPreview.innerHTML = `<div class="proposal-preview-empty">Generate a draft to review polished output here.</div>`;
+    return;
+  }
+  const html = [];
+  let listOpen = false;
+  const closeList = () => {
+    if (listOpen) {
+      html.push("</ul>");
+      listOpen = false;
+    }
+  };
+  blocks.forEach((block) => {
+    if (block.type === "bullet") {
+      if (!listOpen) {
+        html.push("<ul>");
+        listOpen = true;
+      }
+      html.push(`<li>${escapeHtml(block.text)}</li>`);
+      return;
+    }
+    closeList();
+    if (block.type === "heading") {
+      const level = Math.min(Math.max(Number(block.level) || 2, 1), 3);
+      html.push(`<h${level}>${escapeHtml(block.text)}</h${level}>`);
+      return;
+    }
+    html.push(`<p>${escapeHtml(block.text)}</p>`);
+  });
+  closeList();
+  els.proposalPreview.innerHTML = html.join("");
 }
 
 function setProposalError(message) {
@@ -950,7 +1009,7 @@ function setProposalError(message) {
 
 async function copyProposalDraft() {
   if (!els.proposalOutput.value.trim()) return;
-  await navigator.clipboard.writeText(els.proposalOutput.value);
+  await navigator.clipboard.writeText(normalizeProposalMarkdown(els.proposalOutput.value));
   els.proposalCopy.textContent = "Copied";
   window.setTimeout(() => {
     els.proposalCopy.textContent = "Copy";
@@ -960,7 +1019,7 @@ async function copyProposalDraft() {
 function downloadProposalDocx() {
   if (!els.proposalOutput.value.trim()) return;
   downloadBlob(
-    createDocxBlob(els.proposalOutput.value),
+    createDocxBlob(normalizeProposalMarkdown(els.proposalOutput.value)),
     `${proposalExportFilename()}.docx`
   );
 }
@@ -968,7 +1027,7 @@ function downloadProposalDocx() {
 function downloadProposalPdf() {
   if (!els.proposalOutput.value.trim()) return;
   downloadBlob(
-    createPdfBlob(els.proposalOutput.value),
+    createPdfBlob(normalizeProposalMarkdown(els.proposalOutput.value)),
     `${proposalExportFilename()}.pdf`
   );
 }
@@ -1379,14 +1438,21 @@ function renderMonitoringAlerts(alerts) {
 function opportunityButton(item) {
   const decision = opportunityDecision(item);
   const relevance = percent(item.dashboard_relevance_score);
+  const action = item.recommended_action || {};
+  const actionName = action.action || "watch";
+  const stateClasses = [
+    `action-${actionName}`,
+    decision !== "undecided" ? `decision-${decisionClass(decision)}` : "",
+  ].filter(Boolean).join(" ");
+  const actionBadge = `<span class="badge ${escapeHtml(actionName)}">${escapeHtml(titleCase(actionName))}</span>`;
   const decisionBadge = decision !== "undecided"
-    ? `<span class="badge ${escapeHtml(decisionClass(decision))}">${escapeHtml(decisionLabel(decision))}</span>`
+    ? `<span class="badge decision-badge ${escapeHtml(decisionClass(decision))}">${escapeHtml(decisionLabel(decision))}</span>`
     : "";
   return `
-    <button class="opp" type="button" data-id="${escapeHtml(item.opportunity_id || item.notice_id)}">
+    <button class="opp ${escapeHtml(stateClasses)}" type="button" data-id="${escapeHtml(item.opportunity_id || item.notice_id)}">
       <span class="opp-title-line">
         <strong>${escapeHtml(item.title)}</strong>
-        ${decisionBadge}
+        <span class="opp-badges">${actionBadge}${decisionBadge}</span>
       </span>
       <span class="opp-meta">
         <span>${escapeHtml(item.funding_agency_name || "Agency pending")}</span>
@@ -1396,6 +1462,7 @@ function opportunityButton(item) {
         <span>Due ${formatDate(item.response_deadline)}</span>
         <span>${escapeHtml(item.naics_code || "--")}/${escapeHtml(item.psc_code || "--")}</span>
         <span>${relevance} fit</span>
+        <span>${escapeHtml(pwinDisplay(action))}</span>
       </span>
     </button>
   `;
@@ -1426,6 +1493,7 @@ function renderAnalysis(data) {
   els.confidence.textContent = baseline.confidence || "--";
   els.matchCount.textContent = baseline.historical_match_count ?? "--";
   els.matchedObligation.textContent = money(baseline.total_matched_obligation);
+  renderOpportunitySummary(data);
   renderRecommendedAction(data.recommended_action || {});
   renderDecisionDrivers(data);
   renderDecisionState(workflow);
@@ -1448,6 +1516,39 @@ function renderAnalysis(data) {
   renderRates(data.calc_plus_benchmarks || []);
   renderEvidence(data.evidence || {});
   renderNotes(data.notes || []);
+}
+
+function renderOpportunitySummary(data) {
+  const opportunity = data.opportunity || {};
+  const action = data.recommended_action || {};
+  const baseline = data.competitive_baseline || {};
+  const score = data.customer_score || {};
+  const evidence = data.evidence || {};
+  const risks = (action.risks || []).filter(Boolean);
+  const fitFactors = (score.factors || []).filter((factor) => factor.label || factor.evidence);
+  const value = currencyRange(opportunity.estimated_value_min, opportunity.estimated_value_max);
+  const deadline = formatDate(opportunity.response_deadline);
+  const actionLabel = action.action ? titleCase(action.action) : "Review";
+  const topFactor = fitFactors[0];
+
+  els.summaryMatters.textContent = [
+    opportunity.funding_agency_name || "Agency pending",
+    value !== "--" ? value : "",
+    deadline !== "--" ? `due ${deadline}` : "",
+  ].filter(Boolean).join(" · ") || "Agency, value, and deadline pending.";
+  els.summaryPursue.textContent = action.rationale
+    ? `${actionLabel}: ${action.rationale}`
+    : topFactor?.evidence || "Pursuit rationale pending.";
+  els.summaryRisks.textContent = risks.length
+    ? risks.slice(0, 2).join(" ")
+    : baseline.confidence === "low"
+      ? "Low-confidence estimate; validate source documents before proposal effort."
+      : "No major risk flags surfaced from available signals.";
+  els.summaryEvidence.textContent = [
+    evidenceCoverage(evidence),
+    baseline.historical_match_count ? `${numberFormat(baseline.historical_match_count)} historical matches` : "",
+    baseline.total_matched_obligation ? `${money(baseline.total_matched_obligation)} matched obligation` : "",
+  ].filter(Boolean).join(" · ") || "Source coverage pending.";
 }
 
 function renderRecommendedAction(action) {
@@ -2216,7 +2317,7 @@ function createDocxBlob(markdown) {
 }
 
 function renderDocxDocument(markdown) {
-  const paragraphs = proposalMarkdownBlocks(markdown).map((block) => {
+  const paragraphs = proposalMarkdownBlocks(normalizeProposalMarkdown(markdown)).map((block) => {
     if (block.type === "blank") return "<w:p/>";
     if (block.type === "heading") {
       const size = block.level === 1 ? 32 : block.level === 2 ? 28 : 24;
@@ -2309,7 +2410,7 @@ function paginatePdf(markdown) {
     y -= Math.ceil(style.size * 1.38);
   };
 
-  proposalMarkdownBlocks(markdown).forEach((block) => {
+  proposalMarkdownBlocks(normalizeProposalMarkdown(markdown)).forEach((block) => {
     if (block.type === "blank") {
       y -= 8;
       if (y < margin) nextPage();
@@ -2336,7 +2437,7 @@ function pdfBlockStyle(block) {
 }
 
 function proposalMarkdownBlocks(markdown) {
-  return String(markdown || "").split(/\r?\n/).map((line) => {
+  return normalizeProposalMarkdown(markdown).split(/\r?\n/).map((line) => {
     const trimmed = line.trim();
     if (!trimmed) return { type: "blank", text: "" };
     const heading = /^(#{1,3})\s+(.+)$/.exec(trimmed);
@@ -2345,6 +2446,70 @@ function proposalMarkdownBlocks(markdown) {
     if (bullet) return { type: "bullet", text: cleanMarkdownText(bullet[1]) };
     return { type: "paragraph", text: cleanMarkdownText(trimmed.replace(/^>\s?/, "")) };
   });
+}
+
+function normalizeProposalMarkdown(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const normalized = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    if (!isMarkdownTableLine(lines[index])) {
+      normalized.push(lines[index]);
+      index += 1;
+      continue;
+    }
+
+    const tableLines = [];
+    while (index < lines.length && isMarkdownTableLine(lines[index])) {
+      tableLines.push(lines[index]);
+      index += 1;
+    }
+    normalized.push(...markdownTableToBullets(tableLines));
+  }
+
+  return normalized.join("\n");
+}
+
+function isMarkdownTableLine(line) {
+  const trimmed = String(line || "").trim();
+  return trimmed.startsWith("|") && trimmed.endsWith("|") && trimmed.split("|").length >= 4;
+}
+
+function splitMarkdownTableRow(line) {
+  return String(line || "")
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cleanMarkdownText(cell.replace(/\\\|/g, "|")));
+}
+
+function isMarkdownSeparatorRow(cells) {
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(String(cell || "").trim()));
+}
+
+function markdownTableToBullets(tableLines) {
+  const rows = tableLines
+    .map(splitMarkdownTableRow)
+    .filter((cells) => cells.some(Boolean) && !isMarkdownSeparatorRow(cells));
+  if (!rows.length) return [];
+
+  const header = rows.length > 1 ? rows[0] : [];
+  const bodyRows = rows.length > 1 ? rows.slice(1) : rows;
+  const bullets = [];
+  bodyRows.forEach((cells) => {
+    const values = cells
+      .map((cell, cellIndex) => {
+        const label = header[cellIndex] && header[cellIndex].toLowerCase() !== cell.toLowerCase()
+          ? `${header[cellIndex]}: `
+          : "";
+        return cell ? `${label}${cell}` : "";
+      })
+      .filter(Boolean);
+    if (values.length) bullets.push(`- ${values.join("; ")}`);
+  });
+  return bullets.length ? bullets : [""];
 }
 
 function cleanMarkdownText(text) {

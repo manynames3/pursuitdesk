@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PursuitDesk</title>
-    <link rel="stylesheet" href="./styles.css?v=20260525-proposal-bg" />
+    <link rel="stylesheet" href="./styles.css?v=20260525-deliverable" />
   </head>
   <body>
     <header class="topbar">
@@ -116,6 +116,25 @@
               <div class="pwin" id="pwin">--</div>
             </div>
           </div>
+
+          <section class="opportunity-summary-panel" aria-label="Selected opportunity summary">
+            <div>
+              <span>Why this matters</span>
+              <strong id="summary-matters">Select an opportunity to review client impact.</strong>
+            </div>
+            <div>
+              <span>Why pursue</span>
+              <strong id="summary-pursue">Recommendation pending.</strong>
+            </div>
+            <div>
+              <span>Risks</span>
+              <strong id="summary-risks">Risk review pending.</strong>
+            </div>
+            <div>
+              <span>Evidence</span>
+              <strong id="summary-evidence">Source coverage pending.</strong>
+            </div>
+          </section>
 
           <section class="decision-room">
             <div class="recommendation-card">
@@ -440,9 +459,13 @@
             <div class="proposal-output-header">
               <div>
                 <h3>Output workspace</h3>
-                <p>Markdown-friendly draft for review, copy, or export.</p>
+                <p>Reviewed preview with editable source for copy or export.</p>
               </div>
               <div class="proposal-output-actions">
+                <div class="proposal-view-toggle" aria-label="Proposal output view">
+                  <button id="proposal-view-preview" class="secondary compact-button is-active" type="button" disabled>Preview</button>
+                  <button id="proposal-view-edit" class="secondary compact-button" type="button">Edit</button>
+                </div>
                 <button id="proposal-copy" class="secondary compact-button" type="button" disabled>Copy</button>
                 <button id="proposal-download-docx" class="secondary compact-button" type="button" disabled>Export DOCX</button>
                 <button id="proposal-download-pdf" class="secondary compact-button" type="button" disabled>Export PDF</button>
@@ -456,10 +479,13 @@
               <div class="proposal-skeleton medium"></div>
               <div class="proposal-skeleton block"></div>
             </div>
+            <div id="proposal-preview" class="proposal-preview" hidden>
+              <div class="proposal-preview-empty">Generate a draft to review polished output here.</div>
+            </div>
             <textarea
               id="proposal-output"
               spellcheck="true"
-              placeholder="Generated proposal draft will appear here. Edit the markdown before copying or exporting it."
+              placeholder="Generated proposal draft source will appear here for final edits before copying or exporting."
             ></textarea>
             <div id="proposal-error" class="proposal-error" hidden></div>
           </section>
@@ -478,7 +504,7 @@
       </aside>
     </div>
 
-    <script src="./config.js?v=20260525-proposal-bg"></script>
-    <script src="./app.js?v=20260525-proposal-bg" type="module"></script>
+    <script src="./config.js?v=20260525-deliverable"></script>
+    <script src="./app.js?v=20260525-deliverable" type="module"></script>
   </body>
 </html>

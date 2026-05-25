@@ -590,6 +590,14 @@ button.decision-clear[hidden] {
   gap: 10px;
 }
 
+.opp-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: max-content;
+}
+
 .opp-meta,
 .opp-signal-row,
 .row-meta {
@@ -609,6 +617,37 @@ button.decision-clear[hidden] {
   border-radius: 6px;
   padding: 4px 7px;
   background: var(--panel-soft);
+}
+
+.opp.action-pursue,
+.opp.action-team,
+.opp.action-watch,
+.opp.action-skip {
+  color: var(--text);
+}
+
+.opp.action-pursue {
+  box-shadow: inset 3px 0 0 var(--ok);
+}
+
+.opp.action-team {
+  box-shadow: inset 3px 0 0 var(--accent-blue);
+}
+
+.opp.action-watch {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.opp.action-skip {
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+
+.opp.decision-go {
+  background: #f0fdf4;
+}
+
+.opp.decision-no-go {
+  background: #fff7ed;
 }
 
 .analysis {
@@ -712,6 +751,38 @@ button.decision-clear[hidden] {
   font-size: 1.85rem;
   font-weight: 900;
   box-shadow: var(--shadow-soft);
+}
+
+.opportunity-summary-panel {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.opportunity-summary-panel > div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 13px 14px;
+  background: white;
+  box-shadow: var(--shadow-soft);
+}
+
+.opportunity-summary-panel span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.opportunity-summary-panel strong {
+  display: block;
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.45;
 }
 
 .metric-grid,
@@ -1628,6 +1699,25 @@ body.proposal-drawer-open {
   gap: 8px;
 }
 
+.proposal-view-toggle {
+  display: inline-flex;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 3px;
+  background: white;
+}
+
+.proposal-view-toggle .compact-button {
+  border: 0;
+  box-shadow: none;
+}
+
+.proposal-view-toggle .is-active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
 #proposal-output {
   width: 100%;
   min-height: 350px;
@@ -1646,6 +1736,72 @@ body.proposal-drawer-open {
 #proposal-output:focus {
   border-color: #84adff;
   outline: 3px solid #d1e0ff;
+}
+
+.proposal-preview {
+  min-height: 350px;
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 24px;
+  background: white;
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(16, 24, 40, 0.03);
+}
+
+.proposal-preview h1,
+.proposal-preview h2,
+.proposal-preview h3 {
+  margin: 20px 0 8px;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+.proposal-preview h1:first-child,
+.proposal-preview h2:first-child,
+.proposal-preview h3:first-child {
+  margin-top: 0;
+}
+
+.proposal-preview h1 {
+  font-size: 1.45rem;
+}
+
+.proposal-preview h2 {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 1.05rem;
+}
+
+.proposal-preview h3 {
+  font-size: 0.95rem;
+}
+
+.proposal-preview p,
+.proposal-preview li {
+  color: var(--muted-strong);
+  font-size: 0.92rem;
+  line-height: 1.62;
+}
+
+.proposal-preview p {
+  margin: 0 0 10px;
+}
+
+.proposal-preview ul {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0 14px;
+  padding-left: 20px;
+}
+
+.proposal-preview-empty {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+  color: var(--muted);
+  font-weight: 800;
+  text-align: center;
 }
 
 .proposal-loading {
@@ -2067,6 +2223,7 @@ body.proposal-drawer-open {
   .dashboard-grid.three,
   .metric-grid,
   .profile-band,
+  .opportunity-summary-panel,
   .portfolio-grid,
   .action-band,
   .demo-flow,
@@ -2185,6 +2342,14 @@ body.proposal-drawer-open {
 
   .proposal-notification-actions {
     justify-content: flex-end;
+  }
+
+  .proposal-view-toggle {
+    width: 100%;
+  }
+
+  .proposal-view-toggle .compact-button {
+    flex: 1;
   }
 
   .proposal-job-actions {

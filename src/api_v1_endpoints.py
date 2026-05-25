@@ -308,6 +308,19 @@ def list_active_opportunities(
         rows = cur.fetchall()
 
     total = rows[0]["total_count"] if rows else 0
+    items = []
+    for row in rows:
+        item = _opportunity_row(row)
+        pwin = _pipeline_pwin_estimate(row)
+        item["recommended_action"] = _recommended_action_from_scores(
+            p_win=pwin["estimated_p_win"],
+            profile_fit=float(row["dashboard_relevance_score"]),
+            has_source=bool(row.get("ui_link")),
+            response_deadline=row.get("response_deadline"),
+            p_win_range=pwin["p_win_range"],
+            p_win_display_mode=pwin["p_win_display_mode"],
+        )
+        items.append(item)
     return {
         "pagination": {"limit": limit, "offset": offset, "total": total},
         "filters": {
@@ -319,7 +332,7 @@ def list_active_opportunities(
             "team": context.get("tenant_slug"),
         },
         "customer_profile": customer_profile,
-        "items": [_opportunity_row(row) for row in rows],
+        "items": items,
     }
 
 
@@ -3762,6 +3775,7 @@ def _proposal_writer_prompt(
         "- Separate confirmed Section L instructions from inferred response strategy.\n"
         "- Separate confirmed Section M evaluation criteria from advisory win themes.\n"
         "- Map each past performance anchor to a concrete agency, NAICS, PSC, scope, role, value, or evaluation factor match when available.\n"
+        "- Do not use Markdown tables; write client-ready prose and bullets so PDF/DOCX exports remain clean.\n"
         "- Do not invent document text, page limits, certifications, key personnel, clearances, ratings, or client results.\n\n"
         "- Keep the first draft concise: target 700-1,100 words unless the provided context requires more.\n\n"
         "Decision support notice text to include exactly or near-exactly:\n"

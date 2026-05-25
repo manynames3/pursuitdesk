@@ -180,6 +180,7 @@ const els = {
   proposalDownloadDocx: document.querySelector("#proposal-download-docx"),
   proposalDownloadPdf: document.querySelector("#proposal-download-pdf"),
   exportClientReport: document.querySelector("#export-client-report"),
+  operationsDrawer: document.querySelector("#operations-drawer"),
   demoFlowStart: document.querySelector("#demo-flow-start"),
   positioningHeadline: document.querySelector("#positioning-headline"),
   positioningPromise: document.querySelector("#positioning-promise"),
@@ -288,13 +289,22 @@ document.addEventListener("keydown", (event) => {
 });
 els.exportBrief.addEventListener("click", exportBrief);
 els.exportClientReport.addEventListener("click", exportClientReport);
-els.demoFlowStart.addEventListener("click", () => els.intakeCompany.focus());
+els.demoFlowStart.addEventListener("click", () => {
+  if (els.operationsDrawer) els.operationsDrawer.open = true;
+  els.intakeCompany.focus();
+});
 els.clientIntake.addEventListener("submit", submitClientIntake);
 els.reminderForm.addEventListener("submit", submitReminder);
 els.whiteLabelForm.addEventListener("submit", submitWhiteLabel);
 els.brandName.addEventListener("input", updateBrandPreviewFromInputs);
 els.brandColor.addEventListener("input", updateBrandPreviewFromInputs);
 els.brandEmail.addEventListener("input", updateBrandPreviewFromInputs);
+document.querySelector('a[href="#operations-drawer"]')?.addEventListener("click", () => {
+  if (els.operationsDrawer) els.operationsDrawer.open = true;
+});
+if (window.location.hash === "#operations-drawer" && els.operationsDrawer) {
+  els.operationsDrawer.open = true;
+}
 
 renderProposalSectionCards();
 initialize();

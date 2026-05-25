@@ -8,56 +8,274 @@
   </head>
   <body>
     <header class="topbar">
-      <div>
-        <p class="eyebrow">GovCon advisor workspace</p>
-        <h1>PursuitDesk</h1>
+      <div class="brand-lockup">
+        <div>
+          <p class="eyebrow">GovCon advisor workspace</p>
+          <h1>PursuitDesk</h1>
+        </div>
       </div>
+      <nav class="topbar-nav" aria-label="Workspace navigation">
+        <a href="#workspace-start">Client</a>
+        <a href="#opportunity-panel">Pipeline</a>
+        <a href="#capture-panel">Decision room</a>
+        <a href="#proposal-history">Proposals</a>
+        <a href="#operations-drawer">Operations</a>
+      </nav>
       <div class="status-group">
         <div class="status-pill" id="api-status">Connecting</div>
         <div class="status-pill subdued" id="security-status">Tenant context pending</div>
       </div>
     </header>
 
-    <main>
-      <section class="filters" aria-label="Opportunity filters">
-        <label>
-          Client profile
-          <select id="team-select">
-            <option value="demo-growth">Apex Analytica Federal Growth Team</option>
-            <option value="metal-fabrication-shop">Keystone Metal Fabrication Shop</option>
-          </select>
-        </label>
-        <label>
-          Search
-          <input id="search" value="" placeholder="cloud, C5ISR, DHS" />
-        </label>
-        <label>
-          NAICS
-          <input id="naics" inputmode="numeric" placeholder="541512, 541715" />
-        </label>
-        <label>
-          PSC
-          <input id="psc" placeholder="DA01, AC12" />
-        </label>
-        <label>
-          Min value
-          <input id="min-value" inputmode="numeric" placeholder="10000000" />
-        </label>
-        <label>
-          Max value
-          <input id="max-value" inputmode="numeric" placeholder="150000000" />
-        </label>
-        <button id="refresh" type="button">Apply filters</button>
+    <main id="workspace-start" class="workspace-main">
+        <section class="client-context" aria-label="Client account context">
+          <div class="client-context-main">
+            <label class="client-select-label">
+              Client profile
+              <select id="team-select">
+                <option value="demo-growth">Apex Analytica Federal Growth Team</option>
+                <option value="metal-fabrication-shop">Keystone Metal Fabrication Shop</option>
+              </select>
+            </label>
+            <p class="context-copy">Review readiness, qualify live opportunities, record a Go/No-go decision, then generate a client-ready proposal section.</p>
+          </div>
+          <div class="client-context-actions">
+            <button id="demo-flow-start" class="secondary compact-button" type="button">New client</button>
+            <button id="export-client-report" class="secondary compact-button" type="button">Export client PDF</button>
+          </div>
+          <div class="portfolio-grid context-metrics">
+            <div>
+              <span>Clients</span>
+              <strong id="portfolio-client-count">--</strong>
+            </div>
+            <div>
+              <span>Prime-ready</span>
+              <strong id="portfolio-prime-ready">--</strong>
+            </div>
+            <div>
+              <span>Tracked pursuits</span>
+              <strong id="portfolio-pipeline">--</strong>
+            </div>
+            <div>
+              <span>Average readiness</span>
+              <strong id="portfolio-readiness">--</strong>
+            </div>
+          </div>
+        </section>
+
+        <details class="filter-panel" open>
+          <summary>Search and filter opportunities</summary>
+          <section class="filters" aria-label="Opportunity filters">
+            <label>
+              Search
+              <input id="search" value="" placeholder="cloud, C5ISR, DHS" />
+            </label>
+            <label>
+              NAICS
+              <input id="naics" inputmode="numeric" placeholder="541512, 541715" />
+            </label>
+            <label>
+              PSC
+              <input id="psc" placeholder="DA01, AC12" />
+            </label>
+            <label>
+              Min value
+              <input id="min-value" inputmode="numeric" placeholder="10000000" />
+            </label>
+            <label>
+              Max value
+              <input id="max-value" inputmode="numeric" placeholder="150000000" />
+            </label>
+            <button id="refresh" type="button">Apply filters</button>
+          </section>
+        </details>
+
+        <section class="workbench" aria-label="Opportunity qualification workspace">
+          <aside id="opportunity-panel" class="opportunity-list" aria-label="Active opportunities">
+          <div class="section-title">
+            <span>Pipeline</span>
+            <strong id="opportunity-count">0</strong>
+          </div>
+          <div id="opportunities"></div>
+          <div class="opportunity-list-footer">
+            <span id="opportunity-range">Showing 0 of 0</span>
+            <button id="load-more" class="secondary" type="button">Load more</button>
+          </div>
+        </aside>
+
+          <section id="capture-panel" class="analysis" aria-label="Capture analysis">
+          <div class="analysis-header">
+            <div>
+              <p class="eyebrow">Decision room</p>
+              <h2 id="analysis-title">Select an opportunity</h2>
+              <div class="subhead" id="analysis-subhead">Agency, NAICS, and source status pending</div>
+              <div id="decision-status" class="decision-status is-undecided">Advisor decision pending</div>
+            </div>
+            <div class="pwin-card">
+              <span class="help-label" tabindex="0" title="Client-adjusted probability of win based on comparable awards, profile fit, evidence coverage, and pursuit risk.">P-win</span>
+              <div class="pwin" id="pwin">--</div>
+            </div>
+          </div>
+
+          <section class="decision-room">
+            <div class="recommendation-card">
+              <span class="help-label" tabindex="0" title="PursuitDesk's advisory action based on P-win, profile fit, source availability, and deadline risk.">Recommended action</span>
+              <strong id="recommended-action">--</strong>
+              <p id="recommended-rationale">Select an opportunity to generate bid/no-bid guidance.</p>
+              <div id="decision-summary" class="decision-summary">Advisor decision pending.</div>
+            </div>
+            <div class="decision-controls">
+              <span>Record advisor decision</span>
+              <div class="decision-control-buttons">
+                <button id="track-go" class="decision-button decision-go" type="button" aria-pressed="false">Mark Go</button>
+                <button id="track-no-go" class="decision-button decision-no-go" type="button" aria-pressed="false">Mark No-go</button>
+                <button id="track-clear" class="decision-button decision-clear" type="button" hidden>Clear decision</button>
+              </div>
+            </div>
+            <div class="proposal-workflow-card">
+              <span>Proposal workspace</span>
+              <strong>Draft from the selected opportunity</strong>
+              <p>Open the writer after qualification to generate, edit, and export source-backed proposal text.</p>
+              <button
+                id="proposal-writer-open"
+                class="proposal-writer-trigger"
+                type="button"
+                title="Generate a source-backed proposal section for this opportunity."
+                disabled
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M12 20h9" />
+                  <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z" />
+                  <path d="M4 5h.01" />
+                  <path d="M8 2h.01" />
+                  <path d="M3 10h.01" />
+                </svg>
+                Open Proposal Writer
+              </button>
+              <button id="export-brief" class="secondary" type="button" title="Export a client-ready capture brief PDF.">Export PDF brief</button>
+            </div>
+          </section>
+
+          <div class="metric-grid">
+            <div>
+              <span>Confidence</span>
+              <strong id="confidence">--</strong>
+            </div>
+            <div>
+              <span>Historical matches</span>
+              <strong id="match-count">--</strong>
+            </div>
+            <div>
+              <span class="help-label" tabindex="0" title="Total historical obligation from records that matched this opportunity's agency, NAICS, PSC, and SOW signals.">Matched obligation</span>
+              <strong id="matched-obligation">--</strong>
+            </div>
+            <div>
+              <span class="help-label" tabindex="0" title="Baseline win probability from comparable market awards before applying this client's profile fit.">Market P-win</span>
+              <strong id="market-pwin">--</strong>
+            </div>
+            <div>
+              <span>Customer delta</span>
+              <strong id="pwin-delta">--</strong>
+            </div>
+            <div>
+              <span>Profile fit</span>
+              <strong id="profile-fit">--</strong>
+            </div>
+          </div>
+
+          <section class="profile-band">
+            <div>
+              <span>Customer profile</span>
+              <strong id="customer-name">--</strong>
+            </div>
+            <div>
+              <span>Vehicles</span>
+              <strong id="customer-vehicles">--</strong>
+            </div>
+            <div>
+              <span>Clearance / eligibility</span>
+              <strong id="customer-clearance">--</strong>
+            </div>
+          </section>
+
+          <section class="task-evidence-grid">
+            <div>
+              <span>Capture task plan</span>
+              <div id="capture-tasks" class="mini-list"></div>
+            </div>
+            <div>
+              <span>Opportunity deliverables</span>
+              <div id="opportunity-deliverables" class="mini-list"></div>
+            </div>
+            <div class="evidence-callout">
+              <h3>Source-backed evidence</h3>
+              <div id="evidence" class="evidence-grid"></div>
+            </div>
+          </section>
+
+          <section class="proposal-history-section">
+            <h3>Proposal history</h3>
+            <div id="proposal-history" class="proposal-history"></div>
+          </section>
+
+          <details class="analysis-details">
+            <summary>Review supporting analysis, pricing, and notes</summary>
+            <div class="dashboard-grid three">
+              <section>
+                <h3>Customer fit</h3>
+                <div id="fit-factors" class="stack"></div>
+              </section>
+              <section>
+                <h3>Workflow</h3>
+                <div id="workflow" class="stack"></div>
+              </section>
+              <section>
+                <h3>Data freshness</h3>
+                <div id="freshness" class="stack"></div>
+              </section>
+            </div>
+
+            <div class="dashboard-grid three">
+              <section>
+                <h3>Past performance</h3>
+                <div id="past-performance" class="stack"></div>
+              </section>
+              <section>
+                <h3>Billing</h3>
+                <div id="billing" class="stack"></div>
+              </section>
+              <section>
+                <h3>Compliance</h3>
+                <div id="compliance" class="stack"></div>
+              </section>
+            </div>
+
+            <div class="dashboard-grid">
+              <section>
+                <h3>Competing primes</h3>
+                <div id="primes" class="stack"></div>
+              </section>
+              <section>
+                <h3>Target teaming subs</h3>
+                <div id="subs" class="stack"></div>
+              </section>
+            </div>
+
+            <section>
+              <h3>CALC+ labor benchmarks</h3>
+              <div id="rates" class="rate-table"></div>
+            </section>
+
+            <section>
+              <h3>Capture notes</h3>
+              <div id="notes" class="stack"></div>
+            </section>
+          </details>
+        </section>
       </section>
 
-      <section class="consultant-workspace" aria-label="Consultant operating dashboard">
-        <div class="section-title">
-          <span>Consultant workspace</span>
-          <div class="header-actions compact-actions">
-            <button id="demo-flow-start" class="secondary compact-button" type="button">New client</button>
-            <button id="export-client-report" class="secondary compact-button" type="button">Client PDF</button>
-          </div>
-        </div>
+      <details id="operations-drawer" class="consultant-workspace operations-drawer">
+        <summary>Client operations, intake, monitoring, and settings</summary>
         <div class="positioning-band">
           <strong id="positioning-headline">GovCon consulting delivery platform for small-business advisors</strong>
           <span id="positioning-promise">Add a client, get readiness, get top pursuits, export a client report.</span>
@@ -90,24 +308,6 @@
           </label>
           <button id="intake-submit" type="submit">Add client</button>
         </form>
-        <div class="portfolio-grid">
-          <div>
-            <span>Clients</span>
-            <strong id="portfolio-client-count">--</strong>
-          </div>
-          <div>
-            <span>Prime-ready</span>
-            <strong id="portfolio-prime-ready">--</strong>
-          </div>
-          <div>
-            <span>Tracked pursuits</span>
-            <strong id="portfolio-pipeline">--</strong>
-          </div>
-          <div>
-            <span>Average readiness</span>
-            <strong id="portfolio-readiness">--</strong>
-          </div>
-        </div>
         <div class="dashboard-grid three">
           <section>
             <h3>Client portfolio</h3>
@@ -179,169 +379,7 @@
             <p id="brand-save-status" class="form-status" role="status"></p>
           </section>
         </div>
-      </section>
-
-      <section class="layout">
-        <aside class="opportunity-list" aria-label="Active opportunities">
-          <div class="section-title">
-            <span>Active opportunities</span>
-            <strong id="opportunity-count">0</strong>
-          </div>
-          <div id="opportunities"></div>
-          <div class="opportunity-list-footer">
-            <span id="opportunity-range">Showing 0 of 0</span>
-            <button id="load-more" class="secondary" type="button">Load more</button>
-          </div>
-        </aside>
-
-        <section class="analysis" aria-label="Capture analysis">
-          <div class="analysis-header">
-            <div>
-              <p class="eyebrow">Capture analysis</p>
-              <h2 id="analysis-title">Select an opportunity</h2>
-              <div class="subhead" id="analysis-subhead">Agency, NAICS, and source status pending</div>
-              <div id="decision-status" class="decision-status is-undecided">Advisor decision pending</div>
-            </div>
-            <div class="header-actions">
-              <button id="track-go" class="decision-button decision-go" type="button" aria-pressed="false">Mark Go</button>
-              <button id="track-no-go" class="decision-button decision-no-go" type="button" aria-pressed="false">Mark No-go</button>
-              <button id="track-clear" class="decision-button decision-clear" type="button" hidden>Clear decision</button>
-              <button id="proposal-writer-open" class="proposal-writer-trigger" type="button" disabled>
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M12 20h9" />
-                  <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z" />
-                  <path d="M4 5h.01" />
-                  <path d="M8 2h.01" />
-                  <path d="M3 10h.01" />
-                </svg>
-                Proposal Writer
-              </button>
-              <button id="export-brief" class="secondary" type="button">Export PDF brief</button>
-            </div>
-            <div class="pwin" id="pwin">--</div>
-          </div>
-
-          <div class="metric-grid">
-            <div>
-              <span>Confidence</span>
-              <strong id="confidence">--</strong>
-            </div>
-            <div>
-              <span>Historical matches</span>
-              <strong id="match-count">--</strong>
-            </div>
-            <div>
-              <span class="help-label" tabindex="0" title="Total historical obligation from records that matched this opportunity's agency, NAICS, PSC, and SOW signals.">Matched obligation</span>
-              <strong id="matched-obligation">--</strong>
-            </div>
-            <div>
-              <span class="help-label" tabindex="0" title="Baseline win probability from comparable market awards before applying this client's profile fit.">Market P-win</span>
-              <strong id="market-pwin">--</strong>
-            </div>
-            <div>
-              <span>Customer delta</span>
-              <strong id="pwin-delta">--</strong>
-            </div>
-            <div>
-              <span>Profile fit</span>
-              <strong id="profile-fit">--</strong>
-            </div>
-          </div>
-
-          <section class="action-band">
-            <div>
-              <span class="help-label" tabindex="0" title="PursuitDesk's advisory action based on P-win, profile fit, source availability, and deadline risk.">Team recommended action</span>
-              <strong id="recommended-action">--</strong>
-              <p id="recommended-rationale">Select an opportunity to generate bid/no-bid guidance.</p>
-              <div id="decision-summary" class="decision-summary">Advisor decision pending.</div>
-            </div>
-            <div>
-              <span>Capture task plan</span>
-              <div id="capture-tasks" class="mini-list"></div>
-            </div>
-            <div>
-              <span>Opportunity deliverables</span>
-              <div id="opportunity-deliverables" class="mini-list"></div>
-            </div>
-          </section>
-
-          <section>
-            <h3>Proposal history</h3>
-            <div id="proposal-history" class="proposal-history"></div>
-          </section>
-
-          <section class="profile-band">
-            <div>
-              <span>Customer profile</span>
-              <strong id="customer-name">--</strong>
-            </div>
-            <div>
-              <span>Vehicles</span>
-              <strong id="customer-vehicles">--</strong>
-            </div>
-            <div>
-              <span>Clearance / eligibility</span>
-              <strong id="customer-clearance">--</strong>
-            </div>
-          </section>
-
-          <div class="dashboard-grid three">
-            <section>
-              <h3>Customer fit</h3>
-              <div id="fit-factors" class="stack"></div>
-            </section>
-            <section>
-              <h3>Workflow</h3>
-              <div id="workflow" class="stack"></div>
-            </section>
-            <section>
-              <h3>Data freshness</h3>
-              <div id="freshness" class="stack"></div>
-            </section>
-          </div>
-
-          <div class="dashboard-grid three">
-            <section>
-              <h3>Past performance</h3>
-              <div id="past-performance" class="stack"></div>
-            </section>
-            <section>
-              <h3>Billing</h3>
-              <div id="billing" class="stack"></div>
-            </section>
-            <section>
-              <h3>Compliance</h3>
-              <div id="compliance" class="stack"></div>
-            </section>
-          </div>
-
-          <div class="dashboard-grid">
-            <section>
-              <h3>Competing primes</h3>
-              <div id="primes" class="stack"></div>
-            </section>
-            <section>
-              <h3>Target teaming subs</h3>
-              <div id="subs" class="stack"></div>
-            </section>
-          </div>
-
-          <section>
-            <h3>CALC+ labor benchmarks</h3>
-            <div id="rates" class="rate-table"></div>
-          </section>
-
-          <section>
-            <h3>Source-backed evidence</h3>
-            <div id="evidence" class="evidence-grid"></div>
-          </section>
-
-          <section>
-            <h3>Capture notes</h3>
-            <div id="notes" class="stack"></div>
-          </section>
-        </section>
-      </section>
+      </details>
     </main>
 
     <div id="proposal-writer-overlay" class="proposal-overlay" hidden>

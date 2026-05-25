@@ -230,6 +230,7 @@ const els = {
   profileFit: document.querySelector("#profile-fit"),
   recommendedAction: document.querySelector("#recommended-action"),
   recommendedRationale: document.querySelector("#recommended-rationale"),
+  decisionDrivers: document.querySelector("#decision-drivers"),
   captureTasks: document.querySelector("#capture-tasks"),
   opportunityDeliverables: document.querySelector("#opportunity-deliverables"),
   confidence: document.querySelector("#confidence"),
@@ -1060,7 +1061,7 @@ function renderOpportunities(items, total = items.length) {
   els.loadMore.disabled = items.length >= total || total === 0;
   els.opportunities.innerHTML = items.length
     ? items.map((item) => opportunityButton(item)).join("")
-    : `<div class="empty">No active opportunities matched these filters.</div>`;
+    : `<div class="empty">No matching opportunities. Adjust filters or broaden the search.</div>`;
 
   els.opportunities.querySelectorAll(".opp").forEach((button) => {
     button.addEventListener("click", () => loadAnalysis(button.dataset.id));
@@ -1255,6 +1256,7 @@ function renderMonitoringAlerts(alerts) {
 
 function opportunityButton(item) {
   const decision = opportunityDecision(item);
+  const relevance = percent(item.dashboard_relevance_score);
   const decisionBadge = decision !== "undecided"
     ? `<span class="badge ${escapeHtml(decisionClass(decision))}">${escapeHtml(decisionLabel(decision))}</span>`
     : "";
@@ -1266,12 +1268,12 @@ function opportunityButton(item) {
       </span>
       <span class="opp-meta">
         <span>${escapeHtml(item.funding_agency_name || "Agency pending")}</span>
-        <span>${escapeHtml(item.naics_code || "--")}/${escapeHtml(item.psc_code || "--")}</span>
         <span>${currencyRange(item.estimated_value_min, item.estimated_value_max)}</span>
       </span>
-      <span class="opp-meta">
+      <span class="opp-signal-row">
         <span>Due ${formatDate(item.response_deadline)}</span>
-        <span>${percent(item.dashboard_relevance_score)} relevance</span>
+        <span>${escapeHtml(item.naics_code || "--")}/${escapeHtml(item.psc_code || "--")}</span>
+        <span>${relevance} fit</span>
       </span>
     </button>
   `;
@@ -1303,6 +1305,7 @@ function renderAnalysis(data) {
   els.matchCount.textContent = baseline.historical_match_count ?? "--";
   els.matchedObligation.textContent = money(baseline.total_matched_obligation);
   renderRecommendedAction(data.recommended_action || {});
+  renderDecisionDrivers(data);
   renderDecisionState(workflow);
   renderMiniList(els.captureTasks, data.capture_tasks || [], (item) => `${item.task} · ${item.owner || "Owner pending"}`);
   renderMiniList(els.opportunityDeliverables, data.deliverables || [], (item) => `${item.name} · ${item.status}`);
@@ -1332,6 +1335,25 @@ function renderRecommendedAction(action) {
   if (action.action) {
     els.recommendedAction.classList.add(`action-${action.action}`);
   }
+}
+
+function renderDecisionDrivers(data) {
+  const factors = (data.customer_score?.factors || [])
+    .filter((factor) => factor.label || factor.evidence)
+    .slice(0, 3);
+  const coverage = evidenceCoverage(data.evidence);
+  const items = factors.length
+    ? factors.map((factor) => `
+        <li>
+          <strong>${escapeHtml(factor.label || "Decision factor")}</strong>
+          <span>${escapeHtml(factor.evidence || "Evidence pending")}</span>
+        </li>
+      `).join("")
+    : `<li><strong>Source coverage</strong><span>${escapeHtml(coverage || "Select an opportunity to review source coverage.")}</span></li>`;
+  els.decisionDrivers.innerHTML = `
+    <div class="decision-drivers-title">Why this recommendation</div>
+    <ul>${items}</ul>
+  `;
 }
 
 function applyWorkflowState(workflow) {
@@ -1391,9 +1413,16 @@ function updateLoadedOpportunityDecision(workflow) {
 }
 
 function renderMiniList(element, items, template) {
-  element.innerHTML = items.length
-    ? items.slice(0, 4).map((item) => `<span>${escapeHtml(template(item))}</span>`).join("")
-    : `<span>Pending</span>`;
+  if (items.length) {
+    element.innerHTML = items.slice(0, 4).map((item) => `<span>${escapeHtml(template(item))}</span>`).join("");
+    return;
+  }
+  const message = element === els.captureTasks
+    ? "Select an opportunity to generate a task plan."
+    : element === els.opportunityDeliverables
+      ? "Deliverables appear after opportunity qualification."
+      : "Pending";
+  element.innerHTML = `<span class="mini-empty">${escapeHtml(message)}</span>`;
 }
 
 function renderSecurity(context) {

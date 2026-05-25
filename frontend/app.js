@@ -111,11 +111,13 @@ const fallbackAnalysis = {
   ],
   competitive_baseline: {
     estimated_p_win: 0.18,
+    p_win_range: { low: 0.13, high: 0.23, label: "13-23%" },
+    p_win_display_mode: "p_win_range",
     confidence: "low",
     historical_match_count: 0,
     total_matched_obligation: 0,
   },
-  market_baseline: { estimated_p_win: 0.16 },
+  market_baseline: { estimated_p_win: 0.16, p_win_range: { low: 0.11, high: 0.21, label: "11-21%" } },
   evidence: {
     coverage: { opportunity: 1, award: 0, subaward: 0, labor_rate: 2 },
     items: [
@@ -263,7 +265,19 @@ els.teamSelect.addEventListener("change", async () => {
   await loadConsultantWorkspace();
   await loadOpportunities({ append: false });
 });
-els.refresh.addEventListener("click", () => loadOpportunities({ append: false }));
+function applyOpportunityFilters() {
+  loadOpportunities({ append: false });
+}
+
+els.refresh.addEventListener("click", applyOpportunityFilters);
+document.querySelectorAll("#search, #naics, #psc, #min-value, #max-value").forEach((input) => {
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      applyOpportunityFilters();
+    }
+  });
+});
 els.loadMore.addEventListener("click", () => loadOpportunities({ append: true }));
 els.trackGo.addEventListener("click", () => updateWorkflow("go"));
 els.trackNoGo.addEventListener("click", () => updateWorkflow("no_go"));
@@ -1145,6 +1159,7 @@ function renderConsultantWorkspace(workspace) {
               <span>${escapeHtml(opp.funding_agency_name || "--")}</span>
               <span>${escapeHtml(opp.naics_code || "--")}/${escapeHtml(opp.psc_code || "--")}</span>
               <span>${percent(opp.dashboard_relevance_score)} fit</span>
+              <span>${escapeHtml(pwinDisplay(action))}</span>
             </div>
             <div class="row-note">${escapeHtml(action.rationale || "")}</div>
           </div>
@@ -1302,8 +1317,8 @@ function renderAnalysis(data) {
     .join(" · ");
   els.proposalWriterOpen.disabled = !currentOpportunityId;
   syncProposalWriterContext();
-  els.pwin.textContent = percent(baseline.estimated_p_win);
-  els.marketPwin.textContent = percent(market.estimated_p_win);
+  els.pwin.textContent = pwinDisplay(baseline);
+  els.marketPwin.textContent = pwinDisplay(market);
   els.pwinDelta.textContent = signedPercent(customerScore.delta_vs_market);
   els.profileFit.textContent = percent(customerScore.profile_fit_score);
   els.confidence.textContent = baseline.confidence || "--";
@@ -1727,12 +1742,15 @@ function buildFallbackAnalysis(opportunity = null) {
     competitive_baseline: {
       ...fallbackAnalysis.competitive_baseline,
       estimated_p_win: isMetalShop ? 0.22 : fallbackAnalysis.competitive_baseline.estimated_p_win,
+      p_win_range: isMetalShop ? { low: 0.17, high: 0.24, label: "17-24%" } : fallbackAnalysis.competitive_baseline.p_win_range,
     },
     recommended_action: {
       action: isMetalShop ? "team" : "watch",
       priority: "medium",
       rationale: isMetalShop ? "Manufacturing fit is credible; validate drawings, quantities, and prime/sub path." : "Some fit exists; monitor source details and client capacity before proposal effort.",
       p_win: isMetalShop ? 0.22 : 0.18,
+      p_win_range: isMetalShop ? { low: 0.17, high: 0.24, label: "17-24%" } : fallbackAnalysis.competitive_baseline.p_win_range,
+      p_win_display_mode: "p_win_range",
       profile_fit: isMetalShop ? 0.72 : 0.45,
       risks: [],
     },
@@ -1795,6 +1813,9 @@ function buildFallbackWorkspace() {
         dashboard_relevance_score: isMetalShop ? 0.68 : opp.dashboard_relevance_score,
         recommended_action: {
           action: isMetalShop ? "team" : "watch",
+          p_win: isMetalShop ? 0.22 : 0.18,
+          p_win_range: isMetalShop ? { low: 0.17, high: 0.24, label: "17-24%" } : fallbackAnalysis.competitive_baseline.p_win_range,
+          p_win_display_mode: "p_win_range",
           rationale: isMetalShop ? "Fabrication codes and PSCs indicate a possible subcontracting path." : "Monitor until enriched source details improve fit confidence.",
         },
       })),
@@ -1930,6 +1951,16 @@ function percent(value) {
   return `${Math.round(Number(value) * 100)}%`;
 }
 
+function pwinDisplay(baseline = {}) {
+  const range = baseline.p_win_range || {};
+  const label = range.label || (range.low != null && range.high != null ? `${percent(range.low)}-${percent(range.high)}` : "");
+  const center = baseline.estimated_p_win ?? baseline.p_win;
+  if (baseline.p_win_display_mode === "capture_fit") {
+    return label ? `${label} fit` : "Capture fit";
+  }
+  return label || percent(center);
+}
+
 function signedPercent(value) {
   if (value == null || Number.isNaN(Number(value))) return "--";
   const sign = Number(value) > 0 ? "+" : "";
@@ -2004,7 +2035,7 @@ function renderLocalBrief(data) {
     "",
     `- Notice: ${opportunity.notice_id || "--"}`,
     `- Agency: ${opportunity.funding_agency_name || "--"}`,
-    `- P-win: ${baseline.estimated_p_win || "--"}`,
+    `- P-win range: ${pwinDisplay(baseline)}`,
     "",
     "## Competing primes",
     ...(data.competing_primes || []).slice(0, 3).map((prime) => `- ${prime.legal_name}`),
@@ -2053,6 +2084,7 @@ function reportOpportunityLine(opp) {
     opp.funding_agency_name || "Agency pending",
     `${opp.naics_code || "--"}/${opp.psc_code || "--"}`,
     `${percent(opp.dashboard_relevance_score)} profile fit`,
+    `${pwinDisplay(action)} advisory P-win`,
   ].join("; ");
   const source = sourceUrl ? ` Source: ${sourceUrl}` : " Source: source link pending";
   return `- ${opp.title || "Opportunity"}: ${titleCase(action.action || "watch")} | ${fitContext}. Rationale: ${action.rationale || "Review source details and client capacity."}${source}`;

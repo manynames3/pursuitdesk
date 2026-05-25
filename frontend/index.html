@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PursuitDesk</title>
-    <link rel="stylesheet" href="./styles.css?v=20260524-haiku" />
+    <link rel="stylesheet" href="./styles.css?v=20260525-pwin" />
   </head>
   <body>
     <header class="topbar">
@@ -112,7 +112,7 @@
               <div id="decision-status" class="decision-status is-undecided">Advisor decision pending</div>
             </div>
             <div class="pwin-card">
-              <span class="help-label" tabindex="0" title="Client-adjusted probability of win based on comparable awards, profile fit, evidence coverage, and pursuit risk.">P-win</span>
+              <span class="help-label" tabindex="0" title="Client-adjusted probability-of-win range. Low-confidence or market-research records are shown as ranges or capture fit instead of false-precise percentages.">P-win range</span>
               <div class="pwin" id="pwin">--</div>
             </div>
           </div>
@@ -171,7 +171,7 @@
               <strong id="matched-obligation">--</strong>
             </div>
             <div>
-              <span class="help-label" tabindex="0" title="Baseline win probability from comparable market awards before applying this client's profile fit.">Market P-win</span>
+              <span class="help-label" tabindex="0" title="Baseline win-probability range from comparable market awards before applying this client's profile fit.">Market P-win</span>
               <strong id="market-pwin">--</strong>
             </div>
             <div>
@@ -476,7 +476,7 @@
       </aside>
     </div>
 
-    <script src="./config.js?v=20260524-haiku"></script>
-    <script src="./app.js?v=20260524-haiku" type="module"></script>
+    <script src="./config.js?v=20260525-pwin"></script>
+    <script src="./app.js?v=20260525-pwin" type="module"></script>
   </body>
 </html>

@@ -737,11 +737,14 @@ def _fetch_recommended_opportunities_by_tenant(
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
         item = _opportunity_row(row)
+        pwin = _pipeline_pwin_estimate(row)
         item["recommended_action"] = _recommended_action_from_scores(
-            p_win=0.14 + min(0.24, float(row["dashboard_relevance_score"]) * 0.32),
+            p_win=pwin["estimated_p_win"],
             profile_fit=float(row["dashboard_relevance_score"]),
             has_source=bool(row.get("ui_link")),
             response_deadline=row.get("response_deadline"),
+            p_win_range=pwin["p_win_range"],
+            p_win_display_mode=pwin["p_win_display_mode"],
         )
         grouped.setdefault(str(row["tenant_id"]), []).append(item)
     return grouped
@@ -1135,7 +1138,16 @@ def _build_capture_analysis_response(
         raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Capture analysis query timed out.") from exc
 
     response = _json_safe(analysis)
-    response["market_baseline"] = _json_safe(market_baseline.get("competitive_baseline", {}))
+    response["market_baseline"] = _normalize_pwin_baseline(
+        _json_safe(market_baseline.get("competitive_baseline", {})),
+        {},
+        response.get("opportunity", {}),
+    )
+    response["competitive_baseline"] = _normalize_pwin_baseline(
+        response.get("competitive_baseline", {}),
+        response["market_baseline"],
+        response.get("opportunity", {}),
+    )
     response["calc_plus_benchmarks"] = benchmarks
     response["customer_profile"] = customer_profile
     customer_score = _customer_score_breakdown(
@@ -1186,13 +1198,14 @@ def _build_structural_capture_response(
 
     benchmarks = _fetch_calc_benchmarks(conn, opportunity_id=opportunity_id, max_rows=12)
     baseline = _structural_opportunity_baseline(customer_profile, opportunity)
-    market_baseline = {
+    market_baseline = _normalize_pwin_baseline({
         "estimated_p_win": 0.18,
         "confidence": "low",
         "model_scope": "live_sam_structural_only",
         "historical_match_count": 0,
         "total_matched_obligation": 0,
-    }
+    }, {}, opportunity)
+    baseline = _normalize_pwin_baseline(baseline, market_baseline, opportunity)
     customer_score = _customer_score_breakdown(customer_profile, opportunity, baseline, market_baseline)
     recommended_action = _opportunity_recommended_action(opportunity, baseline, customer_score)
     response: Dict[str, Any] = {
@@ -2101,11 +2114,14 @@ def _fetch_recommended_opportunities(conn, profile: Mapping[str, Any], limit: in
     opportunities = []
     for row in rows:
         item = _opportunity_row(row)
+        pwin = _pipeline_pwin_estimate(row)
         action = _recommended_action_from_scores(
-            p_win=0.14 + min(0.24, float(row["dashboard_relevance_score"]) * 0.32),
+            p_win=pwin["estimated_p_win"],
             profile_fit=float(row["dashboard_relevance_score"]),
             has_source=bool(row.get("ui_link")),
             response_deadline=row.get("response_deadline"),
+            p_win_range=pwin["p_win_range"],
+            p_win_display_mode=pwin["p_win_display_mode"],
         )
         item["recommended_action"] = action
         opportunities.append(item)
@@ -2439,6 +2455,8 @@ def _opportunity_recommended_action(
         profile_fit=float(customer_score.get("profile_fit_score") or 0),
         has_source=bool(opportunity.get("ui_link") or opportunity.get("description_url")),
         response_deadline=opportunity.get("response_deadline"),
+        p_win_range=baseline.get("p_win_range"),
+        p_win_display_mode=str(baseline.get("p_win_display_mode") or "p_win_range"),
     )
 
 
@@ -2447,6 +2465,8 @@ def _recommended_action_from_scores(
     profile_fit: float,
     has_source: bool,
     response_deadline: Any,
+    p_win_range: Optional[Mapping[str, Any]] = None,
+    p_win_display_mode: str = "p_win_range",
 ) -> Dict[str, Any]:
     deadline = response_deadline
     if isinstance(deadline, str):
@@ -2467,6 +2487,8 @@ def _recommended_action_from_scores(
         risks.append("Response deadline is inside five days.")
     if profile_fit < 0.45:
         risks.append("Customer profile fit is weak.")
+    if p_win_display_mode == "capture_fit":
+        risks.append("Market research notice; use capture fit instead of proposal-stage P-win.")
 
     if days_to_deadline is not None and days_to_deadline < 0:
         action, priority = "skip", "low"
@@ -2490,6 +2512,8 @@ def _recommended_action_from_scores(
         "priority": priority,
         "rationale": rationale,
         "p_win": round(p_win, 3),
+        "p_win_range": _json_safe(p_win_range) if p_win_range else _pwin_range(p_win, "low"),
+        "p_win_display_mode": p_win_display_mode,
         "profile_fit": round(profile_fit, 3),
         "days_to_deadline": days_to_deadline,
         "risks": risks,
@@ -2539,6 +2563,121 @@ def _opportunity_deliverables(
         {"name": "Compliance checklist", "status": "draft", "description": "Requirements matrix seeded from SAM.gov details and source documents."},
         {"name": "Teaming outreach list", "status": "draft", "description": "Prime/sub targets based on historical matches and client fit."},
     ]
+
+
+def _pipeline_pwin_estimate(row: Mapping[str, Any]) -> Dict[str, Any]:
+    fit_score = _to_float(row.get("dashboard_relevance_score"), 0)
+    display_mode = "capture_fit" if _is_market_research_opportunity(row) else "p_win_range"
+    estimate = 0.08 + min(0.12, fit_score * 0.18)
+    cap = 0.16 if display_mode == "capture_fit" else 0.24
+    estimate = _clamp(estimate, 0.06, cap)
+    return {
+        "estimated_p_win": round(estimate, 3),
+        "p_win_range": _pwin_range(estimate, "low", cap=cap),
+        "p_win_display_mode": display_mode,
+    }
+
+
+def _normalize_pwin_baseline(
+    baseline: Mapping[str, Any],
+    reference_baseline: Mapping[str, Any],
+    opportunity: Mapping[str, Any],
+) -> Dict[str, Any]:
+    normalized = dict(baseline or {})
+    raw_pwin = _to_float(normalized.get("estimated_p_win"), 0.12)
+    confidence = str(normalized.get("confidence") or "low").lower()
+    model_scope = str(normalized.get("model_scope") or "")
+    historical_matches = _to_int(normalized.get("historical_match_count"), 0)
+    market_reference = _to_float(reference_baseline.get("estimated_p_win"), raw_pwin)
+    structural_only = "structural_only" in model_scope or historical_matches == 0
+    display_mode = "capture_fit" if _is_market_research_opportunity(opportunity) else "p_win_range"
+
+    if display_mode == "capture_fit":
+        cap = 0.16 if structural_only else 0.24
+        adjusted = _clamp(raw_pwin, 0.04, cap)
+    elif structural_only:
+        cap = 0.24
+        adjusted = _clamp(raw_pwin, 0.08, cap)
+    else:
+        weight = {"high": 0.85, "medium": 0.55}.get(confidence, 0.30)
+        cap = {"high": 0.50, "medium": 0.35}.get(confidence, 0.24)
+        inputs = normalized.get("score_inputs") if isinstance(normalized.get("score_inputs"), Mapping) else {}
+        if (
+            confidence == "high"
+            and historical_matches >= 75
+            and _to_float(inputs.get("our_relevance_signal"), 0) >= 0.80
+            and _to_float(inputs.get("partner_depth_score"), 0) >= 0.60
+        ):
+            cap = 0.58
+        adjusted = _clamp(market_reference + weight * (raw_pwin - market_reference), 0.06, cap)
+
+    normalized["estimated_p_win_raw"] = round(raw_pwin, 3)
+    normalized["estimated_p_win"] = round(adjusted, 3)
+    normalized["p_win_range"] = _pwin_range(adjusted, confidence, cap=cap)
+    normalized["p_win_display_mode"] = display_mode
+    notes = list(normalized.get("notes") or [])
+    if structural_only:
+        notes.append("P-win is capped because this opportunity lacks historical/embedding-backed competitor evidence.")
+    if display_mode == "capture_fit":
+        notes.append("Market-research notices are shown as capture fit rather than proposal-stage P-win.")
+    elif abs(adjusted - raw_pwin) >= 0.01:
+        notes.append("P-win is confidence-adjusted toward the market baseline to avoid false precision.")
+    normalized["notes"] = notes
+    return normalized
+
+
+def _pwin_range(center: float, confidence: str, cap: Optional[float] = None) -> Dict[str, Any]:
+    margin = {"high": 0.035, "medium": 0.045}.get(str(confidence or "low").lower(), 0.05)
+    ceiling = cap if cap is not None else 0.50
+    low = _clamp(center - margin, 0.03, ceiling)
+    high = _clamp(center + margin, low, ceiling)
+    return {
+        "low": round(low, 3),
+        "high": round(high, 3),
+        "label": f"{round(low * 100)}-{round(high * 100)}%",
+    }
+
+
+def _is_market_research_opportunity(opportunity: Mapping[str, Any]) -> bool:
+    text = " ".join(
+        str(opportunity.get(key) or "")
+        for key in ("opportunity_type", "base_type", "title", "set_aside_description")
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "request for information",
+            "sources sought",
+            "source sought",
+            "rfi",
+            "special notice",
+            "presolicitation",
+            "pre-solicitation",
+            "market research",
+        )
+    )
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
 
 def _import_past_performance(conn, context: Mapping[str, Any], payload: PastPerformanceImport) -> Dict[str, Any]:
@@ -2954,10 +3093,15 @@ def _customer_score_breakdown(
     target_psc = set(profile.get("target_psc_codes") or [])
     target_agencies = set(profile.get("target_agency_codes") or [])
     incumbent_agencies = set(profile.get("incumbent_agency_codes") or [])
+    set_aside_tags = [str(value).lower() for value in (profile.get("set_aside_eligibilities") or [])]
     opportunity_value = opportunity.get("estimated_value_max") or opportunity.get("estimated_value_min") or 0
     max_value = (profile.get("risk_preferences") or {}).get("max_single_award_value") or 0
     market_pwin = float(market_baseline.get("estimated_p_win") or 0)
     company_pwin = float(company_baseline.get("estimated_p_win") or market_pwin)
+    set_aside_text = f"{opportunity.get('set_aside_code') or ''} {opportunity.get('set_aside_description') or ''}".lower()
+    set_aside_required = bool(set_aside_text.strip())
+    set_aside_match = bool(set_aside_text and any(tag and tag in set_aside_text for tag in set_aside_tags))
+    market_research = _is_market_research_opportunity(opportunity)
     factors = [
         {
             "label": "NAICS fit",
@@ -2985,9 +3129,24 @@ def _customer_score_breakdown(
             "evidence": ", ".join((profile.get("clearance_levels") or []) + (profile.get("set_aside_eligibilities") or [])) or "Not configured",
         },
         {
+            "label": "Set-aside fit",
+            "score": 0.85 if set_aside_match else (0.55 if not set_aside_required else 0.38),
+            "evidence": opportunity.get("set_aside_description") or "No explicit set-aside requirement in the opportunity record.",
+        },
+        {
             "label": "Deal size fit",
-            "score": 1.0 if max_value and opportunity_value and float(opportunity_value) <= float(max_value) else 0.55,
+            "score": 1.0 if max_value and opportunity_value and _to_float(opportunity_value) <= _to_float(max_value) else 0.55,
             "evidence": f"Opportunity ceiling {opportunity_value}; profile max single award {max_value or '--'}",
+        },
+        {
+            "label": "Notice stage",
+            "score": 0.45 if market_research else 0.82,
+            "evidence": opportunity.get("opportunity_type") or opportunity.get("base_type") or "Opportunity stage pending.",
+        },
+        {
+            "label": "Source coverage",
+            "score": 0.82 if opportunity.get("ui_link") or opportunity.get("description_url") else 0.35,
+            "evidence": opportunity.get("ui_link") or opportunity.get("description_url") or "Source link pending.",
         },
     ]
     fit_score = sum(float(item["score"]) for item in factors) / len(factors)
@@ -3017,9 +3176,12 @@ def _structural_opportunity_baseline(
         else (0.65 if opportunity.get("funding_agency_code") in target_agencies else 0.0)
     )
     source_signal = 1.0 if opportunity.get("ui_link") or opportunity.get("description_url") else 0.3
-    estimate = 0.14 + 0.12 * naics_signal + 0.08 * psc_signal + 0.10 * agency_signal + 0.02 * source_signal
+    market_research = _is_market_research_opportunity(opportunity)
+    notice_stage_signal = 0.45 if market_research else 0.85
+    estimate = 0.08 + 0.045 * naics_signal + 0.035 * psc_signal + 0.05 * agency_signal + 0.015 * source_signal + 0.02 * notice_stage_signal
+    cap = 0.16 if market_research else 0.24
     return {
-        "estimated_p_win": round(min(0.48, max(0.08, estimate)), 3),
+        "estimated_p_win": round(min(cap, max(0.08, estimate)), 3),
         "confidence": "low",
         "model_scope": "live_sam_structural_only_pending_embedding",
         "historical_match_count": 0,
@@ -3030,6 +3192,7 @@ def _structural_opportunity_baseline(
             "psc_match_rate": psc_signal,
             "agency_match_rate": agency_signal,
             "source_record_signal": source_signal,
+            "notice_stage_signal": notice_stage_signal,
             "avg_match_score": 0,
             "avg_semantic_similarity": 0,
             "partner_depth_score": 0,
@@ -3041,6 +3204,7 @@ def _structural_opportunity_baseline(
             "psc_match": 0.08,
             "agency_match": 0.10,
             "source_record_signal": 0.02,
+            "notice_stage_signal": 0.02,
             "semantic_and_structural_fit": 0,
             "available_partner_depth": 0,
             "incumbent_concentration_penalty": 0,
@@ -3925,8 +4089,9 @@ def _render_capture_brief_markdown(analysis: Mapping[str, Any]) -> str:
         f"- NAICS/PSC: {opportunity.get('naics_code', '--')} / {opportunity.get('psc_code', '--')}",
         f"- Estimated value: {opportunity.get('estimated_value_min', '--')} - {opportunity.get('estimated_value_max', '--')}",
         f"- Customer profile: {customer.get('company_name', '--')}",
-        f"- Company-adjusted P-win: {baseline.get('estimated_p_win', '--')}",
-        f"- Market baseline P-win: {market.get('estimated_p_win', '--')}",
+        f"- Company-adjusted P-win range: {(baseline.get('p_win_range') or {}).get('label') or _format_percent(baseline.get('estimated_p_win'))}",
+        f"- Market baseline P-win range: {(market.get('p_win_range') or {}).get('label') or _format_percent(market.get('estimated_p_win'))}",
+        f"- P-win confidence: {baseline.get('confidence', '--')}",
         f"- Workflow: {workflow.get('status', 'untracked')} / {workflow.get('go_no_go', 'undecided')}",
         "",
         "## Competing Primes",

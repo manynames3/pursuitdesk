@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PursuitDesk</title>
-    <link rel="stylesheet" href="./styles.css?v=20260525-deliverable" />
+    <link rel="stylesheet" href="./styles.css?v=20260530-local-seo" />
   </head>
   <body>
     <header class="topbar">
@@ -16,6 +16,7 @@
       </div>
       <nav class="topbar-nav" aria-label="Workspace navigation">
         <a href="#workspace-start">Client</a>
+        <a href="#local-seo-analyzer">Local SEO</a>
         <a href="#opportunity-panel">Pipeline</a>
         <a href="#capture-panel">Decision room</a>
         <a href="#proposal-history">Proposals</a>
@@ -61,6 +62,85 @@
               <strong id="portfolio-readiness">--</strong>
             </div>
           </div>
+        </section>
+
+        <section id="local-seo-analyzer" class="local-seo-tool" aria-label="Local SEO Authority Analyzer">
+          <div class="local-seo-heading">
+            <div>
+              <p class="eyebrow">Competitive intelligence</p>
+              <h2>Local SEO Authority Analyzer</h2>
+              <p>Here is where competitors have stronger local authority, and here is the highest-leverage build plan to close the gap.</p>
+            </div>
+            <span>Estimated / placeholder until live crawl is connected</span>
+          </div>
+
+          <form id="local-seo-form" class="local-seo-form">
+            <div class="local-seo-form-grid">
+              <label>
+                Business website URL
+                <input name="websiteUrl" type="url" placeholder="https://example.com" required />
+              </label>
+              <label>
+                Business name
+                <input name="businessName" placeholder="Acme Roofing" required />
+              </label>
+              <label>
+                Target city
+                <input name="targetCity" placeholder="Atlanta" required />
+              </label>
+              <label>
+                Target state
+                <input name="targetState" maxlength="24" placeholder="GA" required />
+              </label>
+              <label>
+                Main keyword / service
+                <input name="mainKeyword" placeholder="roof repair" required />
+              </label>
+              <label>
+                Business GBP / Maps URL
+                <input name="mapsUrl" type="url" placeholder="https://maps.google.com/..." />
+              </label>
+            </div>
+
+            <div class="local-seo-competitor-fields" aria-label="Competitor inputs">
+              <label>
+                Competitor 1 website URL
+                <input name="competitor1Url" type="url" placeholder="https://competitor-one.com" />
+              </label>
+              <label>
+                Competitor 1 GBP / Maps URL
+                <input name="competitor1MapsUrl" type="url" placeholder="https://maps.google.com/..." />
+              </label>
+              <label>
+                Competitor 2 website URL
+                <input name="competitor2Url" type="url" placeholder="https://competitor-two.com" />
+              </label>
+              <label>
+                Competitor 2 GBP / Maps URL
+                <input name="competitor2MapsUrl" type="url" placeholder="https://maps.google.com/..." />
+              </label>
+              <label>
+                Competitor 3 website URL
+                <input name="competitor3Url" type="url" placeholder="https://competitor-three.com" />
+              </label>
+              <label>
+                Competitor 3 GBP / Maps URL
+                <input name="competitor3MapsUrl" type="url" placeholder="https://maps.google.com/..." />
+              </label>
+            </div>
+
+            <label class="local-seo-notes">
+              Optional notes
+              <textarea name="notes" rows="4" placeholder="Known pages, reviews, service areas, certifications, pricing content, or schema details"></textarea>
+            </label>
+
+            <div class="local-seo-form-actions">
+              <button type="submit">Analyze local authority</button>
+              <p id="local-seo-status" class="form-status" role="status"></p>
+            </div>
+          </form>
+
+          <div id="local-seo-results" class="local-seo-results" hidden></div>
         </section>
 
         <details class="filter-panel" open>
@@ -504,7 +584,7 @@
       </aside>
     </div>
 
-    <script src="./config.js?v=20260525-deliverable"></script>
-    <script src="./app.js?v=20260525-deliverable" type="module"></script>
+    <script src="./config.js?v=20260530-local-seo"></script>
+    <script src="./app.js?v=20260530-local-seo" type="module"></script>
   </body>
 </html>

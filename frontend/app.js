@@ -1,3 +1,5 @@
+import { initializeLocalSeoAnalyzer } from "./components/local-seo/LocalSeoAnalyzer.js";
+
 const apiBaseUrl = window.CAPTUREOS_API_BASE_URL || "";
 const mobileWorkspaceQuery = window.matchMedia("(max-width: 820px)");
 const desktopOpportunityPageSize = 25;
@@ -337,6 +339,7 @@ if (window.location.hash === "#operations-drawer" && els.operationsDrawer) {
   els.operationsDrawer.open = true;
 }
 
+initializeLocalSeoAnalyzer();
 renderProposalSectionCards();
 applyResponsiveWorkspaceDefaults();
 initialize();

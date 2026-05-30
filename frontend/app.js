@@ -1,5 +1,7 @@
 const apiBaseUrl = window.CAPTUREOS_API_BASE_URL || "";
-const opportunityPageSize = 25;
+const mobileWorkspaceQuery = window.matchMedia("(max-width: 820px)");
+const desktopOpportunityPageSize = 25;
+const mobileOpportunityPageSize = 8;
 
 const proposalSections = [
   {
@@ -158,6 +160,7 @@ const backgroundProposalJobs = new Map();
 const els = {
   apiStatus: document.querySelector("#api-status"),
   securityStatus: document.querySelector("#security-status"),
+  filterPanel: document.querySelector(".filter-panel"),
   teamSelect: document.querySelector("#team-select"),
   refresh: document.querySelector("#refresh"),
   trackGo: document.querySelector("#track-go"),
@@ -335,6 +338,7 @@ if (window.location.hash === "#operations-drawer" && els.operationsDrawer) {
 }
 
 renderProposalSectionCards();
+applyResponsiveWorkspaceDefaults();
 initialize();
 
 async function initialize() {
@@ -408,7 +412,7 @@ async function loadOpportunities({ append = false } = {}) {
 
 function buildOpportunityParams(offset) {
   const params = new URLSearchParams({
-    limit: String(opportunityPageSize),
+    limit: String(opportunityPageSize()),
     offset: String(offset),
   });
 
@@ -423,7 +427,7 @@ function buildOpportunityParams(offset) {
   return params;
 }
 
-async function loadAnalysis(opportunityId) {
+async function loadAnalysis(opportunityId, options = {}) {
   currentOpportunityId = opportunityId;
   setActiveOpportunity(opportunityId);
   const selectedOpportunity = findLoadedOpportunity(opportunityId);
@@ -470,6 +474,7 @@ async function loadAnalysis(opportunityId) {
   setProposalError("");
   renderAnalysis(data);
   await loadOpportunityProposalHistory(opportunityId);
+  if (options.focusAnalysis) focusAnalysisPanel();
 }
 
 function findLoadedOpportunity(opportunityId) {
@@ -1244,7 +1249,7 @@ function renderOpportunities(items, total = items.length) {
     : `<div class="empty">No matching opportunities. Adjust filters or broaden the search.</div>`;
 
   els.opportunities.querySelectorAll(".opp").forEach((button) => {
-    button.addEventListener("click", () => loadAnalysis(button.dataset.id));
+    button.addEventListener("click", () => loadAnalysis(button.dataset.id, { focusAnalysis: true }));
   });
 }
 
@@ -1875,6 +1880,24 @@ function setActiveOpportunity(opportunityId) {
   els.opportunities.querySelectorAll(".opp").forEach((button) => {
     button.classList.toggle("active", button.dataset.id === opportunityId);
   });
+}
+
+function opportunityPageSize() {
+  return mobileWorkspaceQuery.matches ? mobileOpportunityPageSize : desktopOpportunityPageSize;
+}
+
+function applyResponsiveWorkspaceDefaults() {
+  if (mobileWorkspaceQuery.matches && els.filterPanel) {
+    els.filterPanel.open = false;
+  }
+}
+
+function focusAnalysisPanel() {
+  if (!mobileWorkspaceQuery.matches) return;
+  const panel = document.querySelector("#capture-panel");
+  if (!panel) return;
+  const top = Math.max(0, panel.getBoundingClientRect().top + window.scrollY - 48);
+  window.scrollTo({ top, behavior: "smooth" });
 }
 
 function setApiStatus(text) {

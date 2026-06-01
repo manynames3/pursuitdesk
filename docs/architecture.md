@@ -1,6 +1,6 @@
 # Architecture
 
-PursuitDesk is a static frontend plus serverless API for GovCon consulting workflows. It is optimized for a public demo and early paid-MVP path: low idle cost, live public procurement data ingestion, private relational storage, tenant-aware scoring, and async proposal drafting.
+PursuitDesk is a static frontend plus serverless API for GovCon consulting workflows. It is optimized for a public demo and early paid-MVP path: low idle cost, live public procurement data ingestion, managed relational storage, tenant-aware scoring, and async proposal drafting.
 
 ## Container Diagram
 
@@ -18,10 +18,10 @@ flowchart LR
     api["API Lambda\nFastAPI + Mangum"]
     writer["Proposal Writer Lambda\nAsync Bedrock jobs"]
     jobs["DynamoDB\nProposal job history + TTL"]
-    db["RDS PostgreSQL 15\ncapture schema + pgvector"]
+    db["Neon Postgres\ncapture schema + pgvector"]
     scheduler["EventBridge Scheduler"]
     publicIngest["Public ingest Lambdas\nSAM.gov, USAspending, CALC+"]
-    privateUpsert["Private upsert/enrichment Lambdas\nRDS writes + SOW embeddings"]
+    upsert["Upsert/enrichment Lambdas\nNeon writes + SOW embeddings"]
     secrets["Secrets Manager\nSAM.gov, Stripe"]
     alarms["CloudWatch\nLogs + optional alarms"]
   end
@@ -47,13 +47,13 @@ flowchart LR
   writer --> bedrock
   writer --> alarms
   scheduler --> publicIngest
-  scheduler --> privateUpsert
+  scheduler --> upsert
   publicIngest --> sam
   publicIngest --> usaspending
   publicIngest --> calc
-  publicIngest --> privateUpsert
-  privateUpsert --> db
-  privateUpsert --> bedrock
+  publicIngest --> upsert
+  upsert --> db
+  upsert --> bedrock
   publicIngest --> secrets
   api --> secrets
 ```
@@ -73,15 +73,15 @@ flowchart LR
 
 1. EventBridge Scheduler triggers bounded ingestion jobs.
 2. Public ingest Lambdas call external public APIs without requiring a NAT Gateway.
-3. Ingest Lambdas normalize source records and invoke VPC-attached upsert Lambdas.
-4. Upsert Lambdas write to private RDS PostgreSQL and refresh data freshness watermarks.
+3. Ingest Lambdas normalize source records and invoke upsert Lambdas when they need bounded batch writes.
+4. Upsert Lambdas write to Neon Postgres and refresh data freshness watermarks.
 5. SAM.gov enrichment can extract source text and create embeddings for `pgvector`-backed matching.
 
 ## Deployment Shape
 
 - `frontend/` is deployed as static assets on Cloudflare Pages.
 - `src/` and `migrations/` are packaged into ARM64 Python 3.12 Lambda zip artifacts by `scripts/build_lambda_packages.sh`.
-- Terraform in `infra/terraform/` provisions API Gateway, Lambda, RDS, DynamoDB, IAM, EventBridge Scheduler, Secrets Manager references, and optional alarms.
+- Terraform in `infra/terraform/` provisions API Gateway, Lambda, DynamoDB, IAM, EventBridge Scheduler, Secrets Manager references, and optional alarms. PostgreSQL is configured through external Neon connection variables.
 - GitHub Actions can deploy the frontend when Cloudflare credentials are configured.
 - Database migrations and demo seeding are run through the `db_admin` Lambda.
 
@@ -93,8 +93,8 @@ flowchart LR
 
 ## Key Constraints
 
-- Keep public demo idle cost low: no NAT Gateway, no Aurora Serverless, no OpenSearch, no provisioned concurrency, no RDS Proxy, and no long log retention by default.
-- Keep RDS private: Lambda security groups can reach PostgreSQL; the database has no public endpoint.
+- Keep public demo idle cost low: no NAT Gateway, no RDS/Aurora capacity floor, no OpenSearch, no provisioned concurrency, no RDS Proxy, and no long log retention by default.
+- Keep database credentials in ignored tfvars or secret-management workflows; Terraform source must never contain the Neon password or connection string.
 - Preserve strict frontend security posture: do not loosen CSP with inline scripts/styles.
 - Keep live active opportunities source-backed by SAM.gov; do not reintroduce seeded SAM opportunity rows as the live source of truth.
 - Keep proposal binary storage out of scope unless there is a deliberate product/storage decision.

@@ -10,11 +10,12 @@ The app needs relational tenant data, opportunity records, workflow state, evide
 
 ## Decision
 
-Use Amazon RDS PostgreSQL 15 as the primary store with the `capture` schema, JSONB source payloads, generated text-search columns, `pg_trgm`, and `pgvector` HNSW indexes for SOW embeddings.
+Use Neon Postgres as the primary store with the `capture` schema, JSONB source payloads, generated text-search columns, `pg_trgm`, and `pgvector` HNSW indexes for SOW embeddings.
 
 ## Consequences
 
 - Relational records, source evidence, and vector similarity stay in one database.
 - The team avoids OpenSearch, a separate vector database, and extra sync pipelines.
-- RDS is not serverless, so the instance class and storage are intentionally small.
+- The AWS stack no longer provisions or references RDS; Terraform requires external PostgreSQL/Neon connection variables.
+- Neon reduces idle database cost and lets Lambda functions use public networking without a NAT Gateway or VPC ENIs.
 - Heavier search workloads may require a later dedicated search or analytics store.

@@ -1,18 +1,16 @@
 locals {
-  database_url = "postgresql://${var.db_username}:${random_password.db_master.result}@${aws_db_instance.postgres.address}:5432/${var.db_name}"
-
   lambda_base_environment = {
     AWS_USE_DUALSTACK_ENDPOINT   = "true"
     APP_PUBLIC_URL               = var.app_public_url
     BEDROCK_EMBEDDING_MODEL_ID   = var.bedrock_embedding_model_id
     AUTH_REQUIRED                = tostring(var.auth_required)
     BEDROCK_MODEL_ID             = var.bedrock_model_id
-    DATABASE_HOST                = aws_db_instance.postgres.address
-    DATABASE_NAME                = var.db_name
-    DATABASE_PASSWORD            = random_password.db_master.result
-    DATABASE_PORT                = tostring(aws_db_instance.postgres.port)
-    DATABASE_URL                 = local.database_url
-    DATABASE_USER                = var.db_username
+    DATABASE_HOST                = var.database_host
+    DATABASE_NAME                = var.database_name
+    DATABASE_PASSWORD            = var.database_password
+    DATABASE_PORT                = tostring(var.database_port)
+    DATABASE_URL                 = var.database_url
+    DATABASE_USER                = var.database_user
     PGVECTOR_SCHEMA              = "capture"
     PROPOSAL_JOBS_TABLE          = aws_dynamodb_table.proposal_writer_jobs.name
     PROPOSAL_JOB_TTL_SECONDS     = tostring(var.proposal_job_ttl_seconds)
@@ -92,6 +90,8 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_logs" {
 }
 
 resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
+  count = local.create_lambda_vpc ? 1 : 0
+
   role       = aws_iam_role.lambda_exec.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
@@ -179,13 +179,14 @@ resource "aws_lambda_function" "backend" {
 
   reserved_concurrent_executions = each.value.reserved_concurrency
 
-  # VPC-enabled functions can reach private RDS. The SAM fetcher stays outside
-  # the VPC so it has managed Lambda internet egress without a NAT Gateway.
+  # Neon-backed functions default to public Lambda networking so they can reach
+  # external PostgreSQL, AWS APIs, and public data APIs without NAT Gateway cost.
+  # vpc_enabled remains available for future private integrations.
   dynamic "vpc_config" {
     for_each = each.value.vpc_enabled ? [1] : []
     content {
-      subnet_ids                  = [for subnet in aws_subnet.public : subnet.id]
-      security_group_ids          = [aws_security_group.lambda.id]
+      subnet_ids                  = aws_subnet.public[*].id
+      security_group_ids          = aws_security_group.lambda[*].id
       ipv6_allowed_for_dual_stack = true
     }
   }

@@ -9,6 +9,24 @@ Live demo:
 
 The user-facing product and GitHub repository are PursuitDesk. AWS resource names still use `govcon-captureos`.
 
+## Screenshots
+
+Consultant workspace with live opportunity pipeline, readiness context, P-win range, and next-best-action guidance:
+
+![PursuitDesk consultant workspace](docs/screenshots/pursuitdesk-workspace-desktop.jpg)
+
+Decision room for a selected opportunity, including rationale, risks, evidence, advisor decision controls, and proposal entry point:
+
+![PursuitDesk decision room](docs/screenshots/pursuitdesk-decision-room.jpg)
+
+Proposal Writer workspace with target-section controls and source/input checklist:
+
+![PursuitDesk Proposal Writer](docs/screenshots/pursuitdesk-proposal-writer.jpg)
+
+Responsive mobile layout:
+
+![PursuitDesk mobile layout](docs/screenshots/pursuitdesk-mobile.jpg)
+
 ## About
 
 This project is built as a sellable SaaS-style workflow for GovCon advisors, not just a data dashboard. The frontend gives consultants a single workspace for client intake, readiness assessment, opportunity triage, capture workflow, proposal drafting, branded exports, and operational monitoring. The backend combines live public-sector data ingestion, tenant-aware scoring, source evidence, proposal-generation jobs, and production hardening switches for auth, billing, and observability.

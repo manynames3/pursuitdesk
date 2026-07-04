@@ -207,6 +207,7 @@ const els = {
   portfolioPrimeReady: document.querySelector("#portfolio-prime-ready"),
   portfolioPipeline: document.querySelector("#portfolio-pipeline"),
   portfolioReadiness: document.querySelector("#portfolio-readiness"),
+  workspaceReadiness: document.querySelector("#workspace-readiness"),
   clientCards: document.querySelector("#client-cards"),
   readinessScore: document.querySelector("#readiness-score"),
   readinessLabel: document.querySelector("#readiness-label"),
@@ -246,6 +247,9 @@ const els = {
   summaryPursue: document.querySelector("#summary-pursue"),
   summaryRisks: document.querySelector("#summary-risks"),
   summaryEvidence: document.querySelector("#summary-evidence"),
+  nextActionTitle: document.querySelector("#next-action-title"),
+  nextActionDetail: document.querySelector("#next-action-detail"),
+  nextActionButton: document.querySelector("#next-action-button"),
   captureTasks: document.querySelector("#capture-tasks"),
   opportunityDeliverables: document.querySelector("#opportunity-deliverables"),
   confidence: document.querySelector("#confidence"),
@@ -310,6 +314,7 @@ els.proposalCopy.addEventListener("click", copyProposalDraft);
 els.proposalDownloadDocx.addEventListener("click", downloadProposalDocx);
 els.proposalDownloadPdf.addEventListener("click", downloadProposalPdf);
 els.proposalOutput.addEventListener("input", syncProposalDraftActions);
+els.nextActionButton.addEventListener("click", handleNextAction);
 els.proposalNotifications.addEventListener("click", handleProposalNotificationAction);
 els.proposalLibrary.addEventListener("click", handleProposalHistoryAction);
 els.proposalHistory.addEventListener("click", handleProposalHistoryAction);
@@ -1378,6 +1383,7 @@ function renderConsultantWorkspace(workspace) {
 
   const trust = workspace.trust_posture || {};
   const importedSourceCount = trust.import_backed_source_count ?? trust.mock_source_count ?? 0;
+  renderWorkspaceReadiness(trust, importedSourceCount);
   els.trustPosture.innerHTML = `
     <div class="row compact">
       <div class="row-title">
@@ -1393,6 +1399,25 @@ function renderConsultantWorkspace(workspace) {
     </div>
   `;
   renderMonitoringAlerts(workspace.ingest_alerts || {});
+}
+
+function renderWorkspaceReadiness(trust = {}, importedSourceCount = 0) {
+  const authMode = String(trust.auth_mode || "");
+  const billingStatus = String(trust.billing_status || "");
+  const isJwt = authMode.includes("jwt");
+  const billingActive = billingStatus === "active";
+  const billingText = billingActive
+    ? "Billing active"
+    : billingStatus === "trialing"
+      ? "Trial billing state"
+      : "Billing switch not active here";
+  els.workspaceReadiness.innerHTML = `
+    <span class="badge ${isJwt ? "ready" : "info"}">${isJwt ? "Authenticated" : "Public demo"}</span>
+    <span>${numberFormat(trust.live_source_count || 0)} live sources</span>
+    <span>${numberFormat(importedSourceCount)} imported datasets</span>
+    <span>${billingText}</span>
+    <span>${isJwt ? "JWT tenant auth enforced" : "JWT tenant auth not enforced on this public workspace"}</span>
+  `;
 }
 
 function renderDemoFlow(steps) {
@@ -1510,6 +1535,7 @@ function renderAnalysis(data) {
   els.customerClearance.textContent = shortList([...(customer.clearance_levels || []), ...(customer.set_aside_eligibilities || [])]);
 
   renderSecurity(data.security_context || {});
+  renderNextAction(data);
   renderFitFactors(customerScore.factors || []);
   renderWorkflow(workflow);
   renderFreshness(data.data_freshness || []);
@@ -1521,6 +1547,83 @@ function renderAnalysis(data) {
   renderRates(data.calc_plus_benchmarks || []);
   renderEvidence(data.evidence || {});
   renderNotes(data.notes || []);
+}
+
+function renderNextAction(data = {}) {
+  const action = data.recommended_action || {};
+  const workflow = data.workflow || {};
+  const decision = workflow.go_no_go || "undecided";
+  const evidenceCount = totalEvidenceCount(data.evidence);
+  let next = {
+    title: "Pick a pipeline item",
+    detail: "Select a live opportunity to review fit, evidence, risks, and proposal readiness.",
+    label: "Review pipeline",
+    action: "pipeline",
+  };
+
+  if (currentOpportunityId) {
+    if (decision === "go") {
+      next = {
+        title: "Draft the first proposal section",
+        detail: "A Go decision is recorded. Open Proposal Writer after validating the evidence and client capacity.",
+        label: "Open writer",
+        action: "proposal",
+      };
+    } else if (decision === "no_go") {
+      next = {
+        title: "Move to the next pursuit",
+        detail: "No-go is recorded. Keep the rationale for lessons learned and review the next ranked opportunity.",
+        label: "Review pipeline",
+        action: "pipeline",
+      };
+    } else if (action.action === "pursue" || action.action === "team") {
+      next = {
+        title: "Validate evidence, then record Go/No-go",
+        detail: `${titleCase(action.action)} is recommended. Confirm source documents, partner path, and deadline risk before marking a decision.`,
+        label: "Review decision",
+        action: "decision",
+      };
+    } else if (action.action === "skip") {
+      next = {
+        title: "Confirm whether this is a no-bid",
+        detail: "The current fit does not justify proposal effort unless the advisor has outside evidence.",
+        label: "Review risks",
+        action: "evidence",
+      };
+    } else {
+      next = {
+        title: "Watch or qualify with more evidence",
+        detail: evidenceCount
+          ? "Evidence exists, but confidence is limited. Review sources before committing proposal time."
+          : "Source coverage is thin. Wait for documents or choose a better-supported opportunity.",
+        label: "Review evidence",
+        action: "evidence",
+      };
+    }
+  }
+
+  els.nextActionTitle.textContent = next.title;
+  els.nextActionDetail.textContent = next.detail;
+  els.nextActionButton.textContent = next.label;
+  els.nextActionButton.dataset.nextAction = next.action;
+}
+
+function handleNextAction() {
+  const action = els.nextActionButton.dataset.nextAction || "pipeline";
+  if (action === "proposal" && currentOpportunityId) {
+    openProposalWriter();
+    return;
+  }
+  if (action === "decision") {
+    els.trackGo.focus();
+    document.querySelector("#capture-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  if (action === "evidence") {
+    document.querySelector(".task-evidence-grid")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  document.querySelector("#opportunity-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function renderOpportunitySummary(data) {
@@ -2209,9 +2312,13 @@ function shortList(values) {
 }
 
 function evidenceCoverage(evidence) {
-  const coverage = evidence?.coverage || {};
-  const total = Object.values(coverage).reduce((sum, count) => sum + Number(count || 0), 0);
+  const total = totalEvidenceCount(evidence);
   return total ? `${total} source records` : "source records pending";
+}
+
+function totalEvidenceCount(evidence) {
+  const coverage = evidence?.coverage || {};
+  return Object.values(coverage).reduce((sum, count) => sum + Number(count || 0), 0);
 }
 
 function titleCase(value) {

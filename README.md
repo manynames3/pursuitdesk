@@ -37,11 +37,46 @@ The deployed demo intentionally keeps cost low: Cloudflare Pages serves the stat
 - Production controls: Terraform switches for JWT auth, API Gateway authorizer, Stripe secrets, SAM.gov secret ingestion, EventBridge schedules, and optional CloudWatch alarms.
 - Defensive public demo: strict frontend CSP posture is preserved, demo header auth is isolated from JWT-ready production paths, and source limitations are surfaced in reports.
 
+## Evidence Matrix
+
+| Area | Evidence |
+|---|---|
+| IaC | Terraform provisions API Gateway, Lambda, RDS PostgreSQL, DynamoDB proposal jobs, IAM, schedules, and optional alarms in `infra/terraform/`. |
+| CI/CD | GitHub Actions validates Python syntax, frontend JavaScript syntax, Terraform format, Terraform validation, and whitespace checks; frontend deploy workflow uses Wrangler when Cloudflare credentials are configured. |
+| Security | Private RDS security group boundary, JWT/JWKS enforcement switches, optional API Gateway JWT authorizer, Secrets Manager ARN wiring, CSP headers, and demo-header auth separation. |
+| Reliability | Async Proposal Writer jobs, DynamoDB TTL, deterministic proposal fallbacks, bounded ingestion runs, workflow persistence, and documented rollback/recovery paths. |
+| Observability | CloudWatch log groups with short retention, optional Lambda/API Gateway alarms, ingest watermarks, and in-app monitoring surfaces. |
+| Cost | No NAT Gateway, no OpenSearch, no Aurora Serverless, no provisioned concurrency, ARM64 Lambdas, HTTP API, single-AZ RDS, on-demand DynamoDB with TTL, and bounded schedules. |
+| Operations | Runbook, deployment notes, teardown guide, live ingest enablement script, and manual smoke checks. |
+| Testing | Repository validation workflow plus documented gaps for unit/integration/e2e coverage. |
+| Documentation | Architecture overview, AWS diagram notes, ADRs, reviewer guide, security, observability, cost model, deployment, teardown, testing, and tradeoffs docs. |
+
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) for the C4-style container diagram, runtime flows, deployment shape, and key constraints.
+![AWS Architecture](docs/architecture_aws.png)
 
-Architecture decision records are in [docs/adrs/README.md](docs/adrs/README.md).
+PursuitDesk keeps the browser request path simple while separating public data fetches from private database writes:
+
+- **Request flow:** Cloudflare Pages serves the static frontend, which calls API Gateway. FastAPI/Mangum and Proposal Writer Lambda functions handle API traffic, with RDS PostgreSQL/`pgvector` for application data and DynamoDB plus Amazon Bedrock for asynchronous proposal jobs.
+- **Deployment flow:** GitHub Actions deploys `frontend/` to Cloudflare Pages through Wrangler when credentials are configured. Lambda packages are built locally and the AWS stack is deployed with Terraform; no AWS deployment workflow is committed.
+- **Security:** RDS is not publicly accessible and accepts PostgreSQL traffic only from the Lambda security group. JWT/JWKS enforcement, an API Gateway JWT authorizer, and Secrets Manager references are supported but are configuration-dependent and disabled or blank by default.
+- **Observability:** Lambda log groups retain CloudWatch logs for seven days by default. Optional Lambda error, ingest failure, and API Gateway 5xx alarms can be enabled through Terraform.
+- **Cost controls:** The stack uses API Gateway HTTP API, small ARM64 Lambdas, single-AZ RDS, on-demand DynamoDB with TTL, bounded throttles and ingest runs, short log retention, and no NAT Gateway or provisioned concurrency.
+
+See [docs/architecture-notes.md](docs/architecture-notes.md) for diagram evidence, optional-service labels, render instructions, and exclusions. The [logical architecture](docs/architecture.md) remains available as a simpler Mermaid companion.
+
+Reviewer and operations docs:
+
+- [Reviewer guide](docs/reviewer-guide.md)
+- [Deployment](docs/deployment.md)
+- [Runbook](docs/runbook.md)
+- [Security](docs/security.md)
+- [Observability](docs/observability.md)
+- [Cost model](docs/cost-model.md)
+- [Testing](docs/testing.md)
+- [Tradeoffs](docs/tradeoffs.md)
+- [Teardown](docs/teardown.md)
+- [Architecture decision records](docs/adrs/README.md)
 
 ## Repository Layout
 
@@ -50,8 +85,8 @@ Architecture decision records are in [docs/adrs/README.md](docs/adrs/README.md).
 - `migrations/`: PostgreSQL migrations for `pgvector`, capture tables, CALC+ labor rates, paid-MVP workspace, auth/billing, and consultant delivery features.
 - `infra/terraform/`: AWS infrastructure for API Gateway, Lambda, RDS PostgreSQL, DynamoDB proposal jobs, EventBridge schedules, and optional alarms.
 - `scripts/`: Lambda packaging and live SAM.gov ingestion helpers.
-- `.github/workflows/`: Cloudflare Pages deployment workflow.
-- `docs/`: architecture overview and ADRs.
+- `.github/workflows/`: validation workflow and optional Cloudflare Pages deployment workflow.
+- `docs/`: architecture, reviewer, operations, security, cost, testing, teardown, tradeoff, and ADR documentation.
 
 ## Cloudflare Pages
 
@@ -96,6 +131,8 @@ node --check frontend/app.js
 terraform -chdir=infra/terraform fmt -check
 git diff --check
 ```
+
+CI runs the same lightweight checks in `.github/workflows/validate.yml`, plus Terraform init/validate with the backend disabled.
 
 Backend build/deploy:
 
@@ -154,6 +191,15 @@ Set these Terraform variables before using the platform with paying customers:
 - `enable_cloudwatch_alarms = true` if the added CloudWatch alarm cost is acceptable
 
 The public demo uses `demo_header_context` so the Cloudflare page can be exercised without login. JWT validation and API Gateway authorizer support exist, but production authentication is not enabled for the demo URL.
+
+## What I Would Improve Next
+
+- Enforce JWT tenant claims and connect a real identity provider before any paid production rollout.
+- Activate Stripe billing with real products, customer lifecycle handling, and account access controls.
+- Replace remaining seeded/import-like client examples with advisor-imported customer records.
+- Expand SAM.gov attachment extraction and SOW/PWS parsing so proposal drafts cite more primary source text.
+- Add unit tests for scoring/p-win/proposal formatting, integration tests for API routes, and an e2e browser smoke test for the consultant workflow.
+- Add richer onboarding cues and role-based permissions for real consultant teams.
 
 ## Privacy, Security, And Limitations
 

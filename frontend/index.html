@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PursuitDesk</title>
-    <link rel="stylesheet" href="./styles.css?v=20260525-deliverable" />
+    <link rel="stylesheet" href="./styles.css?v=20260704-readiness" />
   </head>
   <body>
     <header class="topbar">
@@ -60,6 +60,11 @@
               <span>Avg readiness</span>
               <strong id="portfolio-readiness">--</strong>
             </div>
+          </div>
+          <div id="workspace-readiness" class="workspace-readiness" aria-live="polite">
+            <span class="badge info">Demo mode</span>
+            <span>Live source checks pending</span>
+            <span>Production auth and billing not active on this public workspace</span>
           </div>
         </section>
 
@@ -134,6 +139,15 @@
               <span>Evidence</span>
               <strong id="summary-evidence">Source coverage pending.</strong>
             </div>
+          </section>
+
+          <section class="next-action-card" aria-label="Next best action">
+            <div>
+              <span>Next best action</span>
+              <strong id="next-action-title">Pick a pipeline item</strong>
+              <p id="next-action-detail">Select a live opportunity to review fit, evidence, risks, and proposal readiness.</p>
+            </div>
+            <button id="next-action-button" class="secondary compact-button" type="button">Review pipeline</button>
           </section>
 
           <section class="decision-room">
@@ -448,10 +462,10 @@
           </section>
 
           <div class="proposal-context-alert">
-            <strong>Verified proposal inputs</strong>
+            <strong>Proposal input checklist</strong>
             <p>
-              Uses the active opportunity, extracted Section L/M requirements, source evidence,
-              and the selected team's past performance profile.
+              Uses the active opportunity, extracted Section L/M signals when available, source evidence,
+              and the selected team's past performance profile. Missing source documents stay marked for validation.
             </p>
           </div>
 
@@ -504,7 +518,7 @@
       </aside>
     </div>
 
-    <script src="./config.js?v=20260525-deliverable"></script>
-    <script src="./app.js?v=20260525-deliverable" type="module"></script>
+    <script src="./config.js?v=20260704-readiness"></script>
+    <script src="./app.js?v=20260704-readiness" type="module"></script>
   </body>
 </html>

@@ -3582,6 +3582,8 @@ def _proposal_generation_mode(model_id: str, suffix: str) -> str:
 def _proposal_quality_report(draft: str, payload: ProposalWriterRequest) -> Dict[str, Any]:
     text = draft.strip()
     lowered = text.lower()
+    requirements = payload.rfp_requirements or {}
+    opportunity = _as_mapping(requirements.get("opportunity"))
     required_markers = [
         "decision support notice",
         "source context",
@@ -3594,10 +3596,13 @@ def _proposal_quality_report(draft: str, payload: ProposalWriterRequest) -> Dict
     missing = [marker for marker in required_markers if marker not in lowered]
     word_count = len(text.split())
     source_grounded = "[source:" in lowered or "source:" in lowered or "sam.gov" in lowered
+    has_document_context = any(marker in lowered for marker in ("section l", "section m", "sow", "pws", "source document"))
     enough_substance = word_count >= 450
     checklist_bullets = lowered.split("compliance checklist", 1)[-1].count("-") if "compliance checklist" in lowered else 0
     if not source_grounded:
         missing.append("source citation notes")
+    if _proposal_sow_excerpt(requirements, opportunity, max_chars=200) and not has_document_context:
+        missing.append("source document context")
     if not enough_substance:
         missing.append("minimum proposal substance")
     if checklist_bullets < 3:
@@ -3732,8 +3737,8 @@ def _proposal_helper_system_prompt() -> str:
 
 def _proposal_section_extraction_prompt(payload: ProposalWriterRequest) -> str:
     return (
-        "Extract proposal-critical Section L/M signals for the target section. "
-        "Return bullets grouped as Section L Instructions, Section M Evaluation Criteria, Required Proof, Citation Hooks, Risks, and Missing Source Documents. "
+        "Extract proposal-critical Section L/M and SOW/PWS signals for the target section. "
+        "Return bullets grouped as Section L Instructions, Section M Evaluation Criteria, SOW/PWS Work Scope, Required Proof, Citation Hooks, Risks, and Missing Source Documents. "
         "For each extracted signal, cite the provided source system, record ID, or URL when available. "
         "Do not infer page limits, factors, certifications, or submission rules that are not present in context.\n\n"
         f"Target section: {payload.target_section}\n"
@@ -3744,9 +3749,9 @@ def _proposal_section_extraction_prompt(payload: ProposalWriterRequest) -> str:
 def _proposal_evidence_summary_prompt(payload: ProposalWriterRequest) -> str:
     return (
         "Summarize the opportunity, source-backed evidence, and customer fit for proposal drafting. "
-        "Return bullets grouped as Opportunity, Evidence, Customer Fit, Past Performance Mapping, Citation Notes, and Assumptions. "
+        "Return bullets grouped as Opportunity, SOW/PWS And Attachments, Evidence, Customer Fit, Past Performance Mapping, Citation Notes, and Assumptions. "
         "Map past performance to the active agency, NAICS, PSC, scope, role, value, and likely evaluation factor. "
-        "Name gaps where source documents, SOW/PWS text, or evaluator criteria remain pending.\n\n"
+        "Name gaps where source documents, attachments, SOW/PWS text, or evaluator criteria remain pending.\n\n"
         f"Target section: {payload.target_section}\n"
         f"Context JSON:\n{_proposal_context_json(payload, max_chars=18000)}"
     )
@@ -3772,6 +3777,7 @@ def _proposal_writer_prompt(
         "## Compliance Checklist\n\n"
         "Drafting rules:\n"
         "- Use citation notes such as [Source: SAM.gov NOTICE_ID] or [Source: client past performance CONTRACT_NUMBER] for material facts.\n"
+        "- Include SOW/PWS or attachment citation notes whenever the provided context includes source-document text or URLs.\n"
         "- Separate confirmed Section L instructions from inferred response strategy.\n"
         "- Separate confirmed Section M evaluation criteria from advisory win themes.\n"
         "- Map each past performance anchor to a concrete agency, NAICS, PSC, scope, role, value, or evaluation factor match when available.\n"
@@ -3795,6 +3801,8 @@ def _proposal_context_json(payload: ProposalWriterRequest, max_chars: int) -> st
     requirements = payload.rfp_requirements or {}
     company_context = payload.company_past_performance or {}
     opportunity = _as_mapping(requirements.get("opportunity"))
+    source_payload = _as_mapping(opportunity.get("source_payload"))
+    sam_enrichment = _as_mapping(source_payload.get("sam_enrichment"))
     profile = _as_mapping(company_context.get("customer_profile"))
     compact = {
         "opportunity": {
@@ -3815,8 +3823,15 @@ def _proposal_context_json(payload: ProposalWriterRequest, max_chars: int) -> st
                 "estimated_value_max",
                 "ui_link",
                 "description_url",
+                "resource_links",
                 "source_updated_at",
             )
+        },
+        "source_documents": {
+            "sow_pws_excerpt": _proposal_sow_excerpt(requirements, opportunity, max_chars=1800),
+            "attachments": _proposal_attachment_context(requirements, opportunity, limit=8),
+            "sam_enrichment_status": sam_enrichment.get("status"),
+            "sam_enrichment_source_count": sam_enrichment.get("source_count") or len(_as_list(sam_enrichment.get("sources"))),
         },
         "section_l": requirements.get("section_l"),
         "section_m": requirements.get("section_m"),
@@ -3885,16 +3900,164 @@ def _compact_past_performance_item(value: Any) -> Dict[str, Any]:
     }
 
 
+def _compact_text(value: Any, max_chars: int) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        text = json.dumps(_json_safe(value), default=str, separators=(",", ":"))
+    else:
+        text = str(value)
+    compact = " ".join(text.split())
+    return compact[:max_chars].strip()
+
+
+def _proposal_first_text(sources: Sequence[Mapping[str, Any]], keys: Sequence[str], max_chars: int) -> str:
+    for source in sources:
+        for key in keys:
+            text = _compact_text(source.get(key), max_chars)
+            if text:
+                return text
+    return ""
+
+
+def _proposal_sow_excerpt(requirements: Mapping[str, Any], opportunity: Mapping[str, Any], max_chars: int = 1200) -> str:
+    source_payload = _as_mapping(opportunity.get("source_payload"))
+    keys = (
+        "sow_text",
+        "sow",
+        "pws",
+        "statement_of_work",
+        "performance_work_statement",
+        "scope",
+        "description",
+        "description_text",
+        "solicitation_description",
+        "additionalInfo",
+    )
+    text = _proposal_first_text((requirements, opportunity, source_payload), keys, max_chars)
+    if text:
+        return text
+    source_summary = _proposal_first_text((source_payload,), ("synopsis", "descriptionOfRequirement", "summary"), max_chars)
+    return source_summary
+
+
+def _proposal_attachment_context(
+    requirements: Mapping[str, Any],
+    opportunity: Mapping[str, Any],
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    source_payload = _as_mapping(opportunity.get("source_payload"))
+    sam_enrichment = _as_mapping(source_payload.get("sam_enrichment"))
+    candidates: List[Any] = []
+    for container in (requirements, opportunity, source_payload):
+        for key in ("attachments", "documents", "source_documents", "document_links", "resource_links", "resourceLinks", "links"):
+            candidates.extend(_as_list(container.get(key)))
+    candidates.extend(_as_list(sam_enrichment.get("sources")))
+
+    documents: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        item = _proposal_document_item(candidate)
+        if not item:
+            continue
+        dedupe_key = item.get("url") or item.get("title") or json.dumps(item, sort_keys=True)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        documents.append(item)
+        if len(documents) >= limit:
+            break
+    return documents
+
+
+def _proposal_document_item(candidate: Any) -> Dict[str, Any]:
+    if isinstance(candidate, str):
+        value = candidate.strip()
+        if not value:
+            return {}
+        if value.startswith(("http://", "https://")):
+            return {"type": "source_document", "title": "SAM.gov source document", "url": value}
+        return {"type": "source_document", "title": _compact_text(value, 180)}
+    if not isinstance(candidate, Mapping):
+        return {}
+    url = candidate.get("url") or candidate.get("href") or candidate.get("link") or candidate.get("download_url")
+    title = (
+        candidate.get("title")
+        or candidate.get("name")
+        or candidate.get("fileName")
+        or candidate.get("filename")
+        or candidate.get("type")
+        or "Source document"
+    )
+    item: Dict[str, Any] = {
+        "type": candidate.get("type") or candidate.get("document_type") or "source_document",
+        "title": _compact_text(title, 180) or "Source document",
+    }
+    if url:
+        item["url"] = str(url)
+    if candidate.get("status"):
+        item["status"] = candidate.get("status")
+    if candidate.get("content_type"):
+        item["content_type"] = candidate.get("content_type")
+    if candidate.get("chars") is not None:
+        item["chars"] = candidate.get("chars")
+    return item
+
+
+def _proposal_document_context_lines(requirements: Mapping[str, Any], opportunity: Mapping[str, Any]) -> List[str]:
+    sow_excerpt = _proposal_sow_excerpt(requirements, opportunity, max_chars=900)
+    documents = _proposal_attachment_context(requirements, opportunity, limit=6)
+    lines = [
+        f"- Section L: {requirements.get('section_l') or 'Extraction pending; validate solicitation instructions before client delivery.'}",
+        f"- Section M: {requirements.get('section_m') or 'Extraction pending; validate evaluation factors before client delivery.'}",
+        f"- SOW/PWS excerpt: {sow_excerpt or 'SOW/PWS source text pending; validate attachments before client delivery.'}",
+    ]
+    if documents:
+        lines.append("- Attachments/source documents:")
+        for item in documents:
+            source = item.get("url") or item.get("status") or "metadata only"
+            lines.append(f"  - {item.get('title') or 'Source document'} ({source})")
+    else:
+        lines.append("- Attachments/source documents: Pending extraction from SAM.gov resource links.")
+    return lines
+
+
+def _proposal_citation_map_lines(
+    requirements: Mapping[str, Any],
+    opportunity: Mapping[str, Any],
+    evidence: Sequence[Mapping[str, Any]],
+    past_performance: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    notice_id = opportunity.get("notice_id") or opportunity.get("solicitation_number") or opportunity.get("opportunity_id") or "notice pending"
+    lines = [
+        f"- [Source: SAM.gov {notice_id}] Primary opportunity notice, agency, NAICS/PSC, deadline, and source links.",
+    ]
+    for item in _proposal_attachment_context(requirements, opportunity, limit=4):
+        source = item.get("url") or item.get("status") or "metadata only"
+        lines.append(f"- [Source: source document] {item.get('title') or 'Attachment'} ({source}).")
+    for item in evidence[:4]:
+        system = item.get("source_system") or "Source"
+        record = f" {item.get('source_record_id')}" if item.get("source_record_id") else ""
+        label = item.get("source_title") or item.get("explanation") or "Evidence record"
+        lines.append(f"- [Source: {system}{record}] {label}.")
+    for row in past_performance[:3]:
+        source = row.get("contract_number") or row.get("past_performance_id") or "record pending"
+        title = row.get("title") or row.get("contract_number") or "Client past performance"
+        lines.append(f"- [Source: client past performance {source}] {title}.")
+    return lines
+
+
 def _deterministic_section_context(payload: ProposalWriterRequest) -> str:
     requirements = payload.rfp_requirements or {}
-    return "\n".join(
+    opportunity = _as_mapping(requirements.get("opportunity"))
+    lines = _proposal_document_context_lines(requirements, opportunity)
+    lines.extend(
         [
-            "- Section L: " + str(requirements.get("section_l") or "Extraction pending; validate solicitation instructions before client delivery."),
-            "- Section M: " + str(requirements.get("section_m") or "Extraction pending; validate evaluation factors before client delivery."),
             f"- Target section: {payload.target_section}.",
-            "- Citation rule: cite available source system, notice ID, source URL, or client past-performance contract number for material facts.",
+            "- Citation rule: cite available source system, notice ID, source URL, source document URL, or client past-performance contract number for material facts.",
         ]
     )
+    return "\n".join(lines)
 
 
 def _deterministic_evidence_summary(payload: ProposalWriterRequest) -> str:
@@ -3907,6 +4070,7 @@ def _deterministic_evidence_summary(payload: ProposalWriterRequest) -> str:
         f"- NAICS/PSC: {opportunity.get('naics_code') or '--'} / {opportunity.get('psc_code') or '--'}.",
         f"- Source: {opportunity.get('ui_link') or opportunity.get('description_url') or 'Source link pending'}.",
     ]
+    lines.extend(_proposal_document_context_lines(requirements, opportunity))
     lines.extend(_proposal_evidence_lines(evidence[:5]))
     return "\n".join(lines)
 
@@ -4007,15 +4171,24 @@ def _render_proposal_writer_markdown(payload: ProposalWriterRequest, context: Ma
         f"- Source: {source_url}",
         f"- Citation format: [Source: SAM.gov {notice_id}] and [Source: client past performance contract number]",
         "",
-        "## Active Document Context",
-        f"- Section L: {requirements.get('section_l') or 'Extraction pending; validate instructions before client delivery.'}",
-        f"- Section M: {requirements.get('section_m') or 'Extraction pending; validate evaluation factors before client delivery.'}",
-        "",
-        f"## Draft {payload.target_section}",
-        narratives.get(payload.target_section, narratives["Technical Approach"]),
-        "",
-        "## Evidence To Weave In",
     ]
+    lines.extend(_proposal_citation_map_lines(requirements, opportunity, evidence, past_performance))
+    lines.extend(
+        [
+            "",
+            "## Active Document Context",
+        ]
+    )
+    lines.extend(_proposal_document_context_lines(requirements, opportunity))
+    lines.extend(
+        [
+            "",
+            f"## Draft {payload.target_section}",
+            narratives.get(payload.target_section, narratives["Technical Approach"]),
+            "",
+            "## Evidence To Weave In",
+        ]
+    )
     lines.extend(_proposal_evidence_lines(evidence))
     lines.extend(["", "## Past Performance Anchors"])
     lines.extend(_proposal_past_performance_lines(past_performance))

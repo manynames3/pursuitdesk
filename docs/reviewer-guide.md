@@ -9,6 +9,7 @@ This guide is for a busy technical reviewer who wants to understand what Pursuit
 3. `infra/terraform/` for the AWS shape: API Gateway HTTP API, Lambda, RDS PostgreSQL, DynamoDB proposal jobs, IAM, EventBridge schedules, and optional alarms.
 4. `src/api_v1_endpoints.py`, `src/proposal_writer_lambda.py`, and `src/auth.py` for backend workflow, async proposal jobs, Bedrock routing, and JWT/demo-auth separation.
 5. `frontend/` for the consultant workspace, pipeline, decision room, background proposal notifications, proposal history, and client-side PDF/DOCX exports.
+6. `tests/` and `.github/workflows/validate.yml` for focused P-win/proposal-formatting tests and repository validation.
 
 ## What This Project Proves
 
@@ -31,8 +32,8 @@ This guide is for a busy technical reviewer who wants to understand what Pursuit
 - The public demo does not enforce production authentication.
 - Stripe billing plumbing exists, but production billing is not activated.
 - Some client profiles, past performance, reminders, and workflow examples are seeded or imported baseline data.
-- Source document/SOW extraction exists as an improvement path; proposal drafts still require human validation against solicitation documents.
-- Test coverage is currently validation-heavy, not a full unit/integration/e2e suite.
+- Source document/SOW extraction has bounded SAM.gov context and citation hooks; proposal drafts still require human validation against solicitation documents.
+- Test coverage includes focused P-win/proposal-context checks, API route contract tests, and a Playwright consultant-workflow smoke test, but authenticated tenant e2e coverage is not complete.
 
 ## How To Inspect Or Run
 

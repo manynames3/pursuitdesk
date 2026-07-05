@@ -155,6 +155,7 @@ let selectedTenantSlug = localStorage.getItem("captureosTenantSlug") || "demo-gr
 let consultantWorkspace = null;
 let decisionSavePending = false;
 let proposalOutputMode = "preview";
+let proposalJobState = { status: "idle", title: "No proposal draft running.", detail: "Start a draft after selecting a pursuit and recording a Go decision." };
 const backgroundProposalJobs = new Map();
 
 const els = {
@@ -185,6 +186,7 @@ const els = {
   proposalViewEdit: document.querySelector("#proposal-view-edit"),
   proposalError: document.querySelector("#proposal-error"),
   proposalNotifications: document.querySelector("#proposal-notifications"),
+  proposalJobStatus: document.querySelector("#proposal-job-status"),
   proposalLibrary: document.querySelector("#proposal-library"),
   proposalHistory: document.querySelector("#proposal-history"),
   exportBrief: document.querySelector("#export-brief"),
@@ -208,6 +210,7 @@ const els = {
   portfolioPipeline: document.querySelector("#portfolio-pipeline"),
   portfolioReadiness: document.querySelector("#portfolio-readiness"),
   workspaceReadiness: document.querySelector("#workspace-readiness"),
+  advisorWorkflow: document.querySelector("#advisor-workflow"),
   clientCards: document.querySelector("#client-cards"),
   readinessScore: document.querySelector("#readiness-score"),
   readinessLabel: document.querySelector("#readiness-label"),
@@ -286,6 +289,13 @@ function applyOpportunityFilters() {
   loadOpportunities({ append: false });
 }
 
+function clearOpportunityFilters() {
+  document.querySelectorAll("#search, #naics, #psc, #min-value, #max-value").forEach((input) => {
+    input.value = "";
+  });
+  loadOpportunities({ append: false });
+}
+
 els.refresh.addEventListener("click", applyOpportunityFilters);
 document.querySelectorAll("#search, #naics, #psc, #min-value, #max-value").forEach((input) => {
   input.addEventListener("keydown", (event) => {
@@ -296,6 +306,9 @@ document.querySelectorAll("#search, #naics, #psc, #min-value, #max-value").forEa
   });
 });
 els.loadMore.addEventListener("click", () => loadOpportunities({ append: true }));
+els.opportunities.addEventListener("click", (event) => {
+  if (event.target.closest("[data-clear-filters]")) clearOpportunityFilters();
+});
 els.trackGo.addEventListener("click", () => updateWorkflow("go"));
 els.trackNoGo.addEventListener("click", () => updateWorkflow("no_go"));
 els.trackClear.addEventListener("click", () => updateWorkflow("undecided"));
@@ -343,6 +356,7 @@ if (window.location.hash === "#operations-drawer" && els.operationsDrawer) {
 }
 
 renderProposalSectionCards();
+setProposalJobStatus(proposalJobState);
 applyResponsiveWorkspaceDefaults();
 initialize();
 
@@ -607,6 +621,11 @@ async function generateProposalDraft() {
     if (response.job_id) {
       setProposalGenerating(false);
       closeProposalWriter();
+      setProposalJobStatus({
+        status: "queued",
+        title: "Proposal draft queued",
+        detail: "You can keep working. PursuitDesk will notify you when the draft is ready.",
+      });
       showProposalNotification({
         type: "info",
         title: "Proposal draft started",
@@ -621,6 +640,11 @@ async function generateProposalDraft() {
       return;
     } else {
       setProposalDraft(response.draft || renderLocalProposalDraft(payload));
+      setProposalJobStatus({
+        status: "ready",
+        title: "Proposal draft ready",
+        detail: "Review the generated draft before exporting it for the client.",
+      });
       setProposalGenerating(false);
       await refreshProposalHistories();
     }
@@ -628,6 +652,11 @@ async function generateProposalDraft() {
   } catch (error) {
     setProposalDraft(renderLocalProposalDraft(payload));
     setProposalError("Live proposal job did not complete; showing a local structured draft from the active opportunity context.");
+    setProposalJobStatus({
+      status: "ready",
+      title: "Local structured draft ready",
+      detail: "Live generation did not complete. Validate this fallback draft carefully before client delivery.",
+    });
     setProposalGenerating(false);
   }
 }
@@ -639,7 +668,7 @@ async function refreshProposalHistories() {
   ]);
 }
 
-async function pollProposalWriterJob(jobId, { updateDrawer = true } = {}) {
+async function pollProposalWriterJob(jobId, { updateDrawer = true, onStatus = null } = {}) {
   const startedAt = Date.now();
   const timeoutMs = 330000;
   let lastStatus = "queued";
@@ -648,6 +677,7 @@ async function pollProposalWriterJob(jobId, { updateDrawer = true } = {}) {
     await wait(lastStatus === "queued" ? 1200 : 2500);
     const job = await fetchJson(`${apiBaseUrl}/api/v1/proposal-writer/jobs/${encodeURIComponent(jobId)}`);
     lastStatus = job.status || lastStatus;
+    if (onStatus) onStatus(lastStatus, job);
     if (lastStatus === "succeeded") {
       return job;
     }
@@ -666,10 +696,26 @@ async function pollProposalWriterJob(jobId, { updateDrawer = true } = {}) {
 function trackBackgroundProposalJob(jobId, payload) {
   if (!jobId || backgroundProposalJobs.has(jobId)) return;
   backgroundProposalJobs.set(jobId, { payload, startedAt: Date.now() });
-  pollProposalWriterJob(jobId, { updateDrawer: false })
+  pollProposalWriterJob(jobId, {
+    updateDrawer: false,
+    onStatus: (status) => {
+      setProposalJobStatus({
+        status,
+        title: status === "running" ? "Proposal draft in progress" : "Proposal draft queued",
+        detail: status === "running"
+          ? "Bedrock is drafting and quality-checking the selected section."
+          : "The job is waiting to start. You can continue reviewing other pursuits.",
+      });
+    },
+  })
     .then(async (job) => {
       backgroundProposalJobs.delete(jobId);
       await refreshProposalHistories();
+      setProposalJobStatus({
+        status: "ready",
+        title: "Proposal draft ready",
+        detail: job.opportunity_title || payload.opportunity_title || "Open the draft from proposal history to review and export.",
+      });
       showProposalNotification({
         type: "success",
         title: "Proposal draft ready",
@@ -682,6 +728,11 @@ function trackBackgroundProposalJob(jobId, payload) {
     .catch(async (error) => {
       backgroundProposalJobs.delete(jobId);
       await refreshProposalHistories();
+      setProposalJobStatus({
+        status: "failed",
+        title: "Proposal draft needs attention",
+        detail: error.message || "The drafting job did not complete. Try again or use the local structured fallback.",
+      });
       showProposalNotification({
         type: "error",
         title: "Proposal draft needs attention",
@@ -771,6 +822,22 @@ function renderProposalJobs(element, jobs, options = {}) {
         `;
       }).join("")
     : `<div class="empty">${escapeHtml(message)}</div>`;
+}
+
+function setProposalJobStatus(state = {}) {
+  proposalJobState = {
+    status: state.status || "idle",
+    title: state.title || "No proposal draft running.",
+    detail: state.detail || "Start a draft after selecting a pursuit and recording a Go decision.",
+  };
+  if (els.proposalJobStatus) {
+    els.proposalJobStatus.className = `proposal-job-status is-${escapeHtml(proposalJobStatusClass(proposalJobState.status))}`;
+    els.proposalJobStatus.innerHTML = `
+      <strong>${escapeHtml(proposalJobState.title)}</strong>
+      <span>${escapeHtml(proposalJobState.detail)}</span>
+    `;
+  }
+  renderAdvisorWorkflow();
 }
 
 async function handleProposalHistoryAction(event) {
@@ -901,7 +968,7 @@ function isQualityCheckedDraft(mode) {
 }
 
 function proposalJobStatusClass(status) {
-  if (status === "succeeded") return "ready";
+  if (status === "succeeded" || status === "ready") return "ready";
   if (status === "failed") return "failed";
   return "info";
 }
@@ -920,6 +987,8 @@ function buildProposalWriterPayload() {
       opportunity,
       section_l: analysis.document_requirements?.section_l || "Section L extraction pending; validate solicitation instructions before client delivery.",
       section_m: analysis.document_requirements?.section_m || "Section M extraction pending; validate evaluation factors before client delivery.",
+      sow_text: analysis.document_requirements?.sow_text || opportunity.sow_text || "",
+      attachments: analysis.document_requirements?.attachments || analysis.document_requirements?.source_documents || opportunity.resource_links || [],
       recommended_action: analysis.recommended_action || {},
       capture_tasks: analysis.capture_tasks || [],
       deliverables: analysis.deliverables || [],
@@ -1052,6 +1121,8 @@ function renderLocalProposalDraft(payload) {
   const profile = payload.company_past_performance.customer_profile || {};
   const evidence = payload.rfp_requirements.evidence || [];
   const pastPerformance = payload.company_past_performance.past_performance || [];
+  const documentLines = localProposalDocumentContextLines(payload.rfp_requirements);
+  const citationLines = localProposalCitationMapLines(payload.rfp_requirements, evidence, pastPerformance);
   return [
     `# ${payload.target_section}: ${payload.opportunity_title}`,
     "",
@@ -1064,10 +1135,10 @@ function renderLocalProposalDraft(payload) {
     `- NAICS/PSC: ${opportunity.naics_code || "--"} / ${opportunity.psc_code || "--"}`,
     `- Source: ${opportunity.ui_link || "Source link pending"}`,
     `- Citation format: [Source: SAM.gov ${opportunity.notice_id || payload.opportunity_id}] and [Source: client past performance contract number]`,
+    ...citationLines,
     "",
     "## Active Document Context",
-    `- Section L: ${payload.rfp_requirements.section_l || "Extraction pending; validate instructions before client delivery."}`,
-    `- Section M: ${payload.rfp_requirements.section_m || "Extraction pending; validate evaluation factors before client delivery."}`,
+    ...documentLines,
     "",
     `## Draft ${payload.target_section}`,
     proposalSectionNarrative(payload.target_section, profile, evidence, pastPerformance),
@@ -1085,6 +1156,64 @@ function renderLocalProposalDraft(payload) {
     "- Confirm pricing, eligibility, and representations outside this drafting assistant.",
     "",
   ].join("\n");
+}
+
+function localProposalDocumentContextLines(requirements) {
+  const opportunity = requirements.opportunity || {};
+  const sow = compactProposalText(requirements.sow_text || opportunity.sow_text || opportunity.description || "", 900);
+  const attachments = localProposalAttachments(requirements).slice(0, 6);
+  return [
+    `- Section L: ${requirements.section_l || "Extraction pending; validate instructions before client delivery."}`,
+    `- Section M: ${requirements.section_m || "Extraction pending; validate evaluation factors before client delivery."}`,
+    `- SOW/PWS excerpt: ${sow || "SOW/PWS source text pending; validate attachments before client delivery."}`,
+    attachments.length
+      ? `- Attachments/source documents: ${attachments.map((item) => `${item.title}${item.url ? ` (${item.url})` : ""}`).join("; ")}`
+      : "- Attachments/source documents: Pending extraction from SAM.gov resource links.",
+  ];
+}
+
+function localProposalCitationMapLines(requirements, evidence, pastPerformance) {
+  const opportunity = requirements.opportunity || {};
+  const notice = opportunity.notice_id || requirements.opportunity_id || "notice pending";
+  const lines = [`- [Source: SAM.gov ${notice}] Primary opportunity notice, agency, NAICS/PSC, deadline, and source links.`];
+  localProposalAttachments(requirements).slice(0, 4).forEach((item) => {
+    lines.push(`- [Source: source document] ${item.title}${item.url ? ` (${item.url})` : ""}.`);
+  });
+  evidence.slice(0, 4).forEach((item) => lines.push(localProposalEvidenceLine(item)));
+  pastPerformance.slice(0, 3).forEach((item) => lines.push(localProposalPastPerformanceLine(item)));
+  return lines;
+}
+
+function localProposalAttachments(requirements) {
+  const opportunity = requirements.opportunity || {};
+  const values = [
+    ...(Array.isArray(requirements.attachments) ? requirements.attachments : []),
+    ...(Array.isArray(requirements.source_documents) ? requirements.source_documents : []),
+    ...(Array.isArray(opportunity.resource_links) ? opportunity.resource_links : []),
+  ];
+  const seen = new Set();
+  return values.map(localProposalAttachmentItem).filter((item) => {
+    if (!item.title) return false;
+    const key = item.url || item.title;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function localProposalAttachmentItem(value) {
+  if (typeof value === "string") {
+    return value.startsWith("http") ? { title: "SAM.gov source document", url: value } : { title: compactProposalText(value, 180) };
+  }
+  if (!value || typeof value !== "object") return {};
+  return {
+    title: compactProposalText(value.title || value.name || value.fileName || value.filename || value.type || "Source document", 180),
+    url: value.url || value.href || value.link || value.download_url || "",
+  };
+}
+
+function compactProposalText(value, maxLength) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
 }
 
 function localProposalEvidenceLine(item) {
@@ -1251,11 +1380,36 @@ function renderOpportunities(items, total = items.length) {
   els.loadMore.disabled = items.length >= total || total === 0;
   els.opportunities.innerHTML = items.length
     ? items.map((item) => opportunityButton(item)).join("")
-    : `<div class="empty">No matching opportunities. Adjust filters or broaden the search.</div>`;
+    : renderOpportunityEmptyState();
 
   els.opportunities.querySelectorAll(".opp").forEach((button) => {
     button.addEventListener("click", () => loadAnalysis(button.dataset.id, { focusAnalysis: true }));
   });
+  renderAdvisorWorkflow();
+}
+
+function renderOpportunityEmptyState() {
+  const filters = activeOpportunityFilters();
+  return `
+    <div class="empty actionable-empty">
+      <strong>No matching opportunities</strong>
+      <p>${filters.length ? `Current filters: ${escapeHtml(filters.join(" / "))}.` : "The current client profile has no visible matches in this view."}</p>
+      <button class="secondary compact-button" type="button" data-clear-filters>Clear filters</button>
+    </div>
+  `;
+}
+
+function activeOpportunityFilters() {
+  return [
+    ["Search", document.querySelector("#search")?.value],
+    ["NAICS", document.querySelector("#naics")?.value],
+    ["PSC", document.querySelector("#psc")?.value],
+    ["Min", document.querySelector("#min-value")?.value],
+    ["Max", document.querySelector("#max-value")?.value],
+  ]
+    .map(([label, value]) => [label, String(value || "").trim()])
+    .filter(([, value]) => value)
+    .map(([label, value]) => `${label}: ${value}`);
 }
 
 function renderConsultantWorkspace(workspace) {
@@ -1384,6 +1538,7 @@ function renderConsultantWorkspace(workspace) {
   const trust = workspace.trust_posture || {};
   const importedSourceCount = trust.import_backed_source_count ?? trust.mock_source_count ?? 0;
   renderWorkspaceReadiness(trust, importedSourceCount);
+  renderAdvisorWorkflow();
   els.trustPosture.innerHTML = `
     <div class="row compact">
       <div class="row-title">
@@ -1418,6 +1573,44 @@ function renderWorkspaceReadiness(trust = {}, importedSourceCount = 0) {
     <span>${billingText}</span>
     <span>${isJwt ? "JWT tenant auth enforced" : "JWT tenant auth not enforced on this public workspace"}</span>
   `;
+}
+
+function renderAdvisorWorkflow() {
+  if (!els.advisorWorkflow) return;
+  const decision = currentAnalysis?.workflow?.go_no_go || "undecided";
+  const hasOpportunity = Boolean(currentOpportunityId);
+  const hasDecision = decision === "go" || decision === "no_go";
+  const proposalActive = proposalJobState.status === "running" || proposalJobState.status === "queued";
+  const proposalReady = proposalJobState.status === "ready";
+  const steps = [
+    {
+      label: "Client",
+      detail: selectedTeam().company_name || selectedTeam().tenant_name || "Profile selected",
+      state: "done",
+    },
+    {
+      label: "Pipeline",
+      detail: hasOpportunity ? "Pursuit selected" : `${numberFormat(totalOpportunities)} live matches`,
+      state: hasOpportunity ? "done" : "active",
+    },
+    {
+      label: "Decision",
+      detail: hasDecision ? decisionLabel(decision) : "Go/no-go pending",
+      state: hasDecision ? "done" : hasOpportunity ? "active" : "locked",
+    },
+    {
+      label: "Proposal",
+      detail: proposalReady ? "Draft ready" : proposalActive ? "Drafting in background" : hasDecision ? "Ready to draft" : hasOpportunity ? "Decision first" : "Ready after qualification",
+      state: proposalReady ? "done" : proposalActive || hasOpportunity ? "active" : "locked",
+    },
+  ];
+
+  els.advisorWorkflow.innerHTML = steps.map((step) => `
+    <div class="workflow-step-chip is-${escapeHtml(step.state)}">
+      <span>${escapeHtml(step.label)}</span>
+      <strong>${escapeHtml(step.detail)}</strong>
+    </div>
+  `).join("");
 }
 
 function renderDemoFlow(steps) {
@@ -1536,6 +1729,7 @@ function renderAnalysis(data) {
 
   renderSecurity(data.security_context || {});
   renderNextAction(data);
+  renderAdvisorWorkflow();
   renderFitFactors(customerScore.factors || []);
   renderWorkflow(workflow);
   renderFreshness(data.data_freshness || []);
@@ -1692,6 +1886,8 @@ function applyWorkflowState(workflow) {
   currentAnalysis.workflow = workflow;
   renderWorkflow(workflow);
   renderDecisionState(workflow);
+  renderNextAction(currentAnalysis);
+  renderAdvisorWorkflow();
   updateLoadedOpportunityDecision(workflow);
 }
 
@@ -1725,6 +1921,7 @@ function renderDecisionState(workflow = {}) {
 function setDecisionSavePending(isPending) {
   decisionSavePending = isPending;
   renderDecisionState(currentAnalysis?.workflow || {});
+  renderAdvisorWorkflow();
 }
 
 function updateLoadedOpportunityDecision(workflow) {
@@ -1990,8 +2187,8 @@ function opportunityPageSize() {
 }
 
 function applyResponsiveWorkspaceDefaults() {
-  if (mobileWorkspaceQuery.matches && els.filterPanel) {
-    els.filterPanel.open = false;
+  if (els.filterPanel) {
+    els.filterPanel.open = true;
   }
 }
 

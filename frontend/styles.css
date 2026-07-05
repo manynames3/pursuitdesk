@@ -849,6 +849,52 @@ button.decision-clear[hidden] {
   flex: 0 0 auto;
 }
 
+.advisor-workflow {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workflow-step-chip {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--panel-soft);
+}
+
+.workflow-step-chip span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.workflow-step-chip strong {
+  display: block;
+  color: var(--text);
+  font-size: 0.8rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.workflow-step-chip.is-active {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+.workflow-step-chip.is-done {
+  border-color: #abefc6;
+  background: #ecfdf3;
+}
+
+.workflow-step-chip.is-locked {
+  opacity: 0.72;
+}
+
 .metric-grid,
 .dashboard-grid {
   display: grid;
@@ -1401,6 +1447,25 @@ tr:last-child td {
   font-size: 0.9rem;
 }
 
+.actionable-empty {
+  display: grid;
+  gap: 10px;
+}
+
+.actionable-empty strong {
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.actionable-empty p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.actionable-empty .compact-button {
+  justify-self: start;
+}
+
 .evidence-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1465,6 +1530,38 @@ tr:last-child td {
 
 .proposal-notification.error {
   border-color: #fecaca;
+}
+
+.proposal-job-status {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--panel-soft);
+  color: var(--muted-strong);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.proposal-job-status strong {
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.proposal-job-status.is-info {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.proposal-job-status.is-ready {
+  border-color: #abefc6;
+  background: #ecfdf3;
+}
+
+.proposal-job-status.is-failed {
+  border-color: #fecaca;
+  background: #fff5f5;
 }
 
 .proposal-notification strong {
@@ -1898,6 +1995,14 @@ body.proposal-drawer-open {
   border-radius: 8px;
   padding: 18px;
   background: white;
+}
+
+.proposal-loading p {
+  max-width: 620px;
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 0.9rem;
+  line-height: 1.45;
 }
 
 .proposal-loading[hidden] {
@@ -2446,6 +2551,10 @@ body.proposal-drawer-open {
     width: 100%;
   }
 
+  .advisor-workflow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .header-actions button {
     flex: 1 1 110px;
   }
@@ -2574,7 +2683,24 @@ body.proposal-drawer-open {
   }
 
   .filter-panel .filters {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .filter-panel .filters label:first-child,
+  .filter-panel .filters button {
+    grid-column: 1 / -1;
+  }
+
+  .advisor-workflow {
+    display: flex;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scroll-snap-type: x proximity;
+  }
+
+  .workflow-step-chip {
+    flex: 0 0 170px;
+    scroll-snap-align: start;
   }
 }
 

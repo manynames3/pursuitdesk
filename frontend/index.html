@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PursuitDesk</title>
-    <link rel="stylesheet" href="./styles.css?v=20260704-readiness" />
+    <link rel="stylesheet" href="./styles.css?v=20260704-selfserve" />
   </head>
   <body>
     <header class="topbar">
@@ -66,6 +66,7 @@
             <span>Live source checks pending</span>
             <span>Production auth and billing not active on this public workspace</span>
           </div>
+          <div id="advisor-workflow" class="advisor-workflow" aria-label="Advisor workflow checklist"></div>
         </section>
 
         <details class="filter-panel" open>
@@ -187,6 +188,7 @@
                 Open Proposal Writer
               </button>
               <button id="export-brief" class="secondary" type="button" title="Export a client-ready capture brief PDF.">Export PDF brief</button>
+              <div id="proposal-job-status" class="proposal-job-status" aria-live="polite">No proposal draft running.</div>
             </div>
           </section>
 
@@ -488,6 +490,7 @@
             <div id="proposal-loading" class="proposal-loading" hidden>
               <div class="proposal-spinner" aria-hidden="true"></div>
               <strong id="proposal-loading-status">Architecting Compliant Narrative...</strong>
+              <p id="proposal-loading-note">You can close this writer and keep qualifying pursuits. PursuitDesk will notify you when the draft is ready.</p>
               <div class="proposal-skeleton"></div>
               <div class="proposal-skeleton wide"></div>
               <div class="proposal-skeleton medium"></div>
@@ -518,7 +521,7 @@
       </aside>
     </div>
 
-    <script src="./config.js?v=20260704-readiness"></script>
-    <script src="./app.js?v=20260704-readiness" type="module"></script>
+    <script src="./config.js?v=20260704-selfserve"></script>
+    <script src="./app.js?v=20260704-selfserve" type="module"></script>
   </body>
 </html>

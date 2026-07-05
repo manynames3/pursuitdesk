@@ -48,6 +48,7 @@ The deployed demo intentionally keeps cost low: Cloudflare Pages serves the stat
 ## Engineering Highlights
 
 - Multi-tenant GovCon workflow: tenant and user context, client profile rollups, readiness scoring, capture workflow state, notes, reminders, and branded report settings.
+- Consultant-guided UX: compact workflow cues, recoverable filter empty states, next-best-action guidance, persistent proposal-job status, and background draft notifications.
 - Source-backed capture analysis: live opportunity records, market P-win, client-adjusted P-win, evidence bundles, score-factor explanations, competitor/partner signals, CALC+ pricing context, and source drilldowns.
 - Proposal Writer: async Bedrock-backed proposal jobs that use Nova Lite for fast, lower-cost preprocessing and Claude Sonnet for higher-quality final drafting, with citation-ready prompts, source evidence, client past-performance mapping, saved draft history, and client-side PDF/DOCX export.
 - Low-cost cloud architecture: no NAT Gateway, no Aurora Serverless, no OpenSearch, no provisioned concurrency, bounded Lambda memory, short log retention, and on-demand DynamoDB.
@@ -66,7 +67,7 @@ The deployed demo intentionally keeps cost low: Cloudflare Pages serves the stat
 | Observability | CloudWatch log groups with short retention, optional Lambda/API Gateway alarms, ingest watermarks, and in-app monitoring surfaces. |
 | Cost | No NAT Gateway, no OpenSearch, no Aurora Serverless, no provisioned concurrency, ARM64 Lambdas, HTTP API, single-AZ RDS, on-demand DynamoDB with TTL, and bounded schedules. |
 | Operations | Runbook, deployment notes, teardown guide, live ingest enablement script, and manual smoke checks. |
-| Testing | Repository validation workflow plus documented gaps for unit/integration/e2e coverage. |
+| Testing | Repository validation workflow, focused P-win/proposal-formatting/proposal-context unit tests, API route integration tests, and a Playwright consultant-workflow smoke test. |
 | Documentation | Architecture overview, AWS diagram notes, ADRs, reviewer guide, security, observability, cost model, deployment, teardown, testing, and tradeoffs docs. |
 
 ## Architecture
@@ -145,12 +146,15 @@ Common validation:
 
 ```bash
 python3 -m py_compile src/proposal_writer_lambda.py src/api_v1_endpoints.py src/db_admin_lambda.py src/gsa_api_ingest.py src/partner_matching.py src/mock_data_seeder.py
+python3 -m pip install -r requirements-dev.txt
+python3 -m unittest discover -s tests -p 'test_*.py'
 node --check frontend/app.js
+node --test tests/*.test.mjs
 terraform -chdir=infra/terraform fmt -check
 git diff --check
 ```
 
-CI runs the same lightweight checks in `.github/workflows/validate.yml`, plus Terraform init/validate with the backend disabled.
+CI runs the same lightweight checks in `.github/workflows/validate.yml`, plus focused Python unit tests, API route integration tests, frontend formatting tests, a Playwright consultant-workflow smoke test, and Terraform init/validate with the backend disabled.
 
 Backend build/deploy:
 
@@ -215,9 +219,9 @@ The public demo uses `demo_header_context` so the Cloudflare page can be exercis
 - Enforce JWT tenant claims and connect a real identity provider before any paid production rollout.
 - Activate Stripe billing with real products, customer lifecycle handling, and account access controls.
 - Replace remaining seeded/import-like client examples with advisor-imported customer records.
-- Expand SAM.gov attachment extraction and SOW/PWS parsing so proposal drafts cite more primary source text.
-- Add unit tests for scoring/p-win/proposal formatting, integration tests for API routes, and an e2e browser smoke test for the consultant workflow.
-- Add richer onboarding cues and role-based permissions for real consultant teams.
+- Deepen SAM.gov attachment extraction for more file formats and add more proposal quality regression tests.
+- Add authenticated tenant e2e tests once production auth is enabled.
+- Expand guided onboarding and add role-based permissions for real consultant teams.
 
 ## Privacy, Security, And Limitations
 

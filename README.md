@@ -31,14 +31,14 @@ Responsive mobile layout:
 
 This project is built as a sellable SaaS-style workflow for GovCon advisors, not just a data dashboard. The frontend gives consultants a single workspace for client intake, readiness assessment, opportunity triage, capture workflow, proposal drafting, branded exports, and operational monitoring. The backend combines live public-sector data ingestion, tenant-aware scoring, source evidence, proposal-generation jobs, and production hardening switches for auth, billing, and observability.
 
-The deployed demo intentionally keeps cost low: Cloudflare Pages serves the static frontend, API Gateway HTTP API routes requests to Python Lambda functions, RDS PostgreSQL with `pgvector` stores structured and semantic capture data, and DynamoDB stores async Proposal Writer jobs with TTL.
+The deployed demo intentionally keeps cost low: Cloudflare Pages serves the static frontend, API Gateway HTTP API routes requests to Python Lambda functions, Neon Postgres with `pgvector` stores structured and semantic capture data, and DynamoDB stores async Proposal Writer jobs with TTL.
 
 ## Tech Stack
 
 - Frontend: static HTML, CSS, and vanilla JavaScript deployed on Cloudflare Pages.
 - API: Python 3.12, FastAPI, Mangum, Pydantic, PyJWT.
 - Compute: AWS Lambda on ARM64 behind API Gateway v2 HTTP API.
-- Data: Amazon RDS PostgreSQL 15, `pgvector`, `pg_trgm`, JSONB, generated search columns, HNSW vector index.
+- Data: Neon Postgres, `pgvector`, `pg_trgm`, JSONB, generated search columns, HNSW vector index.
 - Async jobs: DynamoDB on-demand table for Proposal Writer job state and history.
 - AI: Amazon Bedrock Proposal Writer with Claude Sonnet (`us.anthropic.claude-sonnet-4-6`) for final proposal drafts, Amazon Nova Lite (`amazon.nova-lite-v1:0`) for lower-cost Section L/M extraction and evidence summarization, Nova Pro fallback, and deterministic/template fallbacks.
 - Ingestion: SAM.gov opportunities, USAspending awards/subawards, FSRS-derived subaward signals, and GSA CALC+ labor-rate benchmarks.
@@ -51,8 +51,8 @@ The deployed demo intentionally keeps cost low: Cloudflare Pages serves the stat
 - Consultant-guided UX: compact workflow cues, recoverable filter empty states, next-best-action guidance, persistent proposal-job status, and background draft notifications.
 - Source-backed capture analysis: live opportunity records, market P-win, client-adjusted P-win, evidence bundles, score-factor explanations, competitor/partner signals, CALC+ pricing context, and source drilldowns.
 - Proposal Writer: async Bedrock-backed proposal jobs that use Nova Lite for fast, lower-cost preprocessing and Claude Sonnet for higher-quality final drafting, with citation-ready prompts, source evidence, client past-performance mapping, saved draft history, and client-side PDF/DOCX export.
-- Low-cost cloud architecture: no NAT Gateway, no Aurora Serverless, no OpenSearch, no provisioned concurrency, bounded Lambda memory, short log retention, and on-demand DynamoDB.
-- No-NAT ingestion pattern: public fetch Lambdas call public APIs and invoke private upsert Lambdas that write to private RDS, keeping database access private without paying for NAT.
+- Low-cost cloud architecture: no NAT Gateway, no RDS/Aurora capacity floor, no OpenSearch, no provisioned concurrency, bounded Lambda memory, short log retention, Neon scale-to-zero behavior, and on-demand DynamoDB.
+- Public Lambda ingestion pattern: fetch and upsert Lambdas use managed public Lambda networking to call public procurement APIs and Neon directly, avoiding VPC ENI/NAT complexity for the demo.
 - Production controls: Terraform switches for JWT auth, API Gateway authorizer, Stripe secrets, SAM.gov secret ingestion, EventBridge schedules, and optional CloudWatch alarms.
 - Defensive public demo: strict frontend CSP posture is preserved, demo header auth is isolated from JWT-ready production paths, and source limitations are surfaced in reports.
 
@@ -102,7 +102,7 @@ Reviewer and operations docs:
 - `frontend/`: static Cloudflare Pages dashboard and client-side PDF/DOCX export code.
 - `src/`: Python API, ingestion, entity resolution, proposal writer, auth, and partner-matching modules.
 - `migrations/`: PostgreSQL migrations for `pgvector`, capture tables, CALC+ labor rates, paid-MVP workspace, auth/billing, and consultant delivery features.
-- `infra/terraform/`: AWS infrastructure for API Gateway, Lambda, RDS PostgreSQL, DynamoDB proposal jobs, EventBridge schedules, and optional alarms.
+- `infra/terraform/`: AWS infrastructure for API Gateway, Lambda, DynamoDB proposal jobs, EventBridge schedules, and optional alarms. The PostgreSQL database is externalized through Neon connection variables.
 - `scripts/`: Lambda packaging and live SAM.gov ingestion helpers.
 - `.github/workflows/`: validation workflow and optional Cloudflare Pages deployment workflow.
 - `docs/`: architecture, reviewer, operations, security, cost, testing, teardown, tradeoff, and ADR documentation.
@@ -129,6 +129,18 @@ Build deployable AWS Lambda artifacts before running Terraform:
 ```
 
 The script creates ARM64 Python 3.12-compatible zip files under `dist/` for the API, ingestion, entity resolver, and one-shot database admin Lambda.
+
+Create an ignored Terraform vars file with the Neon connection settings before applying the backend stack. Do not commit this file:
+
+```bash
+cp infra/terraform/neon.auto.tfvars.example infra/terraform/neon.auto.tfvars
+$EDITOR infra/terraform/neon.auto.tfvars
+terraform -chdir=infra/terraform apply -auto-approve
+```
+
+The `database_url` should be the direct Neon connection string and should include `sslmode=require`. Keep pooled Neon connection strings for high-concurrency app traffic only when the code path is compatible with PgBouncer transaction pooling; migrations and admin tasks should use the direct string.
+
+When applying against an older RDS-backed Terraform state, review the plan carefully. Removing the retired RDS instance, RDS security group, database subnet group, and unused Lambda VPC resources is expected after the Neon cutover; applying placeholder database values is not.
 
 Initialize or refresh the demo database after Terraform has deployed the Lambda functions:
 
@@ -160,6 +172,8 @@ Backend build/deploy:
 
 ```bash
 ./scripts/build_lambda_packages.sh
+test -f infra/terraform/neon.auto.tfvars || cp infra/terraform/neon.auto.tfvars.example infra/terraform/neon.auto.tfvars
+$EDITOR infra/terraform/neon.auto.tfvars # first deploy only
 terraform -chdir=infra/terraform apply -auto-approve
 ```
 
@@ -182,7 +196,7 @@ export SAM_API_KEY="..."
 ./scripts/enable_live_sam_ingest.sh
 ```
 
-The script creates or updates an AWS Secrets Manager secret, writes the secret ARN to the ignored `infra/terraform/live_ingest.auto.tfvars` file, enables the EventBridge Scheduler job, and runs a one-time active-opportunity backfill. The scheduled path uses a no-NAT split: public fetch Lambda to private VPC upsert Lambda.
+The script creates or updates an AWS Secrets Manager secret, writes the secret ARN to the ignored `infra/terraform/live_ingest.auto.tfvars` file, enables the EventBridge Scheduler job, and runs a one-time active-opportunity backfill. The scheduled path uses public Lambda networking for both fetch and upsert functions so they can reach public APIs and Neon without a NAT Gateway.
 
 Manual bridge backfill:
 
@@ -208,6 +222,7 @@ Set these Terraform variables before using the platform with paying customers:
 - `auth_required = true`
 - `jwt_issuer`, `jwt_audience`, `jwt_jwks_url`
 - `enable_api_gateway_jwt_authorizer = true` when issuer/audience are stable
+- `database_url`, `database_host`, `database_user`, `database_password`, `database_name`, and `database_port` in an ignored Neon tfvars file
 - `sam_api_key_secret_arn` and `enable_gsa_ingest_schedule = true`
 - `stripe_api_key_secret_arn`, `stripe_webhook_secret_arn`, and `stripe_price_id`
 - `enable_cloudwatch_alarms = true` if the added CloudWatch alarm cost is acceptable

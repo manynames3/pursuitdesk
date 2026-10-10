@@ -690,6 +690,11 @@ button.decision-clear[hidden] {
   color: var(--accent);
 }
 
+.analysis-header > :first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .analysis-header h2 {
   max-width: 760px;
   font-size: clamp(1.35rem, 1.7vw, 1.9rem);
@@ -748,8 +753,11 @@ button.decision-clear[hidden] {
 
 .pwin-card {
   display: grid;
+  flex: 0 0 auto;
   gap: 7px;
-  min-width: 112px;
+  width: max-content;
+  min-width: 0;
+  max-width: 100%;
   justify-items: stretch;
 }
 
@@ -764,13 +772,17 @@ button.decision-clear[hidden] {
 .pwin {
   display: grid;
   place-items: center;
-  min-width: 112px;
-  height: 76px;
+  min-width: 0;
+  min-height: 76px;
+  padding: 14px 18px;
   border: 1px solid #b2ddff;
   border-radius: 8px;
   background: #eff8ff;
   color: #175cd3;
-  font-size: 1.85rem;
+  font-size: 1.5rem;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: anywhere;
   font-weight: 900;
   box-shadow: var(--shadow-soft);
 }

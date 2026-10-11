@@ -1,0 +1,9 @@
+# Copy to neon.auto.tfvars and fill in real Neon values.
+# The copied file is ignored by git because it contains secrets.
+
+database_url      = "postgresql://captureos:REPLACE_ME@ep-example.us-east-1.aws.neon.tech/captureos?sslmode=require"
+database_host     = "ep-example.us-east-1.aws.neon.tech"
+database_name     = "captureos"
+database_user     = "captureos"
+database_password = "REPLACE_ME"
+database_port     = 5432
